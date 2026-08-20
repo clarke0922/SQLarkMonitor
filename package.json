@@ -1,0 +1,20 @@
+{
+  "name": "sqlark-monitor",
+  "version": "1.0.0",
+  "private": true,
+  "description": "SQLark 测试资产台账与健康预警平台",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "bcryptjs": "^3.0.2",
+    "better-sqlite3": "^12.2.0",
+    "express": "^5.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "node-cron": "^4.2.1",
+    "nodemailer": "^9.0.5"
+  }
+}
