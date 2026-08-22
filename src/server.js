@@ -141,7 +141,7 @@ app.get('/api/assets', auth, (req, res) => {
 const importColumns = [
   ['name','资产名称'],['category','资产分类'],['environment','所属环境'],['owner','负责人'],['department','部门'],
   ['protocol','检查方式'],['url','访问URL'],['host','主机地址'],['port','端口'],['tags','标签'],
-  ['maintenance_expires_at','维护/许可到期日'],['secret_ref','密码库引用'],['description','说明'],['enabled','启用巡检']
+  ['database_name','数据库名/服务名'],['maintenance_expires_at','维护/许可到期日'],['secret_ref','密码库引用'],['description','说明'],['enabled','启用巡检']
 ];
 const headerAliases = new Map(importColumns.flatMap(([key,label]) => [[key,key],[label,key]]));
 
@@ -194,7 +194,7 @@ app.get('/api/assets/import/template', auth, allow('admin','editor'), async (req
   sheet.columns = importColumns.map(([key,label]) => ({ header: label, key, width: Math.max(14,label.length*2+4) }));
   sheet.getRow(1).font = { bold:true, color:{argb:'FFFFFFFF'} }; sheet.getRow(1).fill = { type:'pattern',pattern:'solid',fgColor:{argb:'FF4666F6'} };
   sheet.addRow({ name:'示例：测试 GitLab',category:'代码/制品平台',environment:'测试',owner:'张三',department:'测试部',protocol:'http',url:'https://gitlab.example.com',tags:'核心,代码仓库',maintenance_expires_at:'2027-12-31',secret_ref:'vault://sqlark/gitlab',description:'请删除示例行后填写',enabled:'是' });
-  sheet.views = [{state:'frozen',ySplit:1}]; sheet.autoFilter = {from:'A1',to:'N1'};
+  sheet.views = [{state:'frozen',ySplit:1}]; sheet.autoFilter = {from:'A1',to:'O1'};
   const buffer = await workbook.xlsx.writeBuffer();
   res.attachment('sqlark-assets-import-template.xlsx').type('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet').send(Buffer.from(buffer));
 });
@@ -212,7 +212,7 @@ app.post('/api/assets/import', auth, allow('admin','editor'), (req, res) => {
   for(const item of normalized){const name=String(item.data.name||'').toLowerCase();if(name&&(existing.has(name)||seen.has(name)))item.errors.push('资产名称已存在');seen.add(name);}
   const invalid = normalized.filter(item=>item.errors.length);
   if(invalid.length) return res.status(400).json({error:'导入数据校验失败，未写入任何资产',rows:normalized});
-  const insert = db.prepare(`INSERT INTO assets(name,category,environment,owner,department,url,host,port,protocol,description,secret_ref,tags,maintenance_expires_at,enabled) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+  const insert = db.prepare(`INSERT INTO assets(name,category,environment,owner,department,url,host,port,protocol,database_name,description,secret_ref,tags,maintenance_expires_at,enabled) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
   const transaction = db.transaction(items=>{for(const item of items)insert.run(...assetValues(item.data));});
   transaction(normalized); audit(req.user,'import','assets',null,`批量导入 ${normalized.length} 条资产`); res.status(201).json({imported:normalized.length});
 });
@@ -223,22 +223,27 @@ function assetValues(body) {
   if (!validCategories.includes(body.category)) throw new Error('资产分类无效');
   if (body.protocol === 'http' && !/^https?:\/\//i.test(body.url || '')) throw new Error('HTTP 检查需要有效 URL');
   if (body.protocol === 'tcp' && (!body.host || !Number(body.port))) throw new Error('TCP 检查需要主机和端口');
+  const databaseProtocols=['mysql','postgresql','sqlserver','oracle'];
+  if(databaseProtocols.includes(body.protocol)&&(!body.host||!body.database_name))throw new Error('数据库检查需要主机地址和数据库名/服务名');
+  if(databaseProtocols.includes(body.protocol)&&!/^profile:\/\/[A-Za-z0-9_-]+$/.test(body.secret_ref||''))throw new Error('数据库检查需要 profile://配置名 格式的凭据引用');
+  const defaultPorts={mysql:3306,postgresql:5432,sqlserver:1433,oracle:1521};
+  if(databaseProtocols.includes(body.protocol)&&!body.port)body.port=defaultPorts[body.protocol];
   return [body.name.trim(), body.category, body.environment || '测试', body.owner.trim(), body.department || '测试部',
-    body.url || null, body.host || null, body.port ? Number(body.port) : null, body.protocol || 'none', body.description || null,
+    body.url || null, body.host || null, body.port ? Number(body.port) : null, body.protocol || 'none', body.database_name || null, body.description || null,
     body.secret_ref || null, body.tags || null, body.maintenance_expires_at || null, body.enabled === false ? 0 : 1];
 }
 
 app.post('/api/assets', auth, allow('admin','editor'), (req, res) => {
   try {
-    const result = db.prepare(`INSERT INTO assets(name,category,environment,owner,department,url,host,port,protocol,description,secret_ref,tags,maintenance_expires_at,enabled)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(...assetValues(req.body));
+    const result = db.prepare(`INSERT INTO assets(name,category,environment,owner,department,url,host,port,protocol,database_name,description,secret_ref,tags,maintenance_expires_at,enabled)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(...assetValues(req.body));
     audit(req.user, 'create', 'asset', result.lastInsertRowid, req.body.name); res.status(201).json({ id: result.lastInsertRowid });
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
 app.put('/api/assets/:id', auth, allow('admin','editor'), (req, res) => {
   try {
-    db.prepare(`UPDATE assets SET name=?,category=?,environment=?,owner=?,department=?,url=?,host=?,port=?,protocol=?,description=?,secret_ref=?,tags=?,maintenance_expires_at=?,enabled=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`)
+    db.prepare(`UPDATE assets SET name=?,category=?,environment=?,owner=?,department=?,url=?,host=?,port=?,protocol=?,database_name=?,description=?,secret_ref=?,tags=?,maintenance_expires_at=?,enabled=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`)
       .run(...assetValues(req.body), req.params.id);
     audit(req.user, 'update', 'asset', Number(req.params.id), req.body.name); res.json({ ok: true });
   } catch (e) { res.status(400).json({ error: e.message }); }
@@ -258,7 +263,37 @@ app.post('/api/alerts/:id/resolve', auth, allow('admin','editor'), (req, res) =>
   db.prepare("UPDATE alerts SET status='resolved',resolved_at=CURRENT_TIMESTAMP WHERE id=?").run(req.params.id);
   audit(req.user,'resolve','alert',Number(req.params.id)); res.json({ok:true});
 });
-app.get('/api/audit', auth, allow('admin'), (req, res) => res.json(db.prepare('SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 200').all()));
+function auditQuery(query, includePaging = true) {
+  const conditions=[];const params=[];
+  if(query.q){conditions.push('(username LIKE ? OR action LIKE ? OR detail LIKE ?)');const value=`%${String(query.q).slice(0,100)}%`;params.push(value,value,value);}
+  if(query.username){conditions.push('username=?');params.push(String(query.username).slice(0,100));}
+  if(query.action){conditions.push('action=?');params.push(String(query.action).slice(0,100));}
+  if(query.target_type){conditions.push('target_type=?');params.push(String(query.target_type).slice(0,100));}
+  if(/^\d{4}-\d{2}-\d{2}$/.test(query.date_from||'')){conditions.push('date(created_at)>=date(?)');params.push(query.date_from);}
+  if(/^\d{4}-\d{2}-\d{2}$/.test(query.date_to||'')){conditions.push('date(created_at)<=date(?)');params.push(query.date_to);}
+  const where=conditions.length?`WHERE ${conditions.join(' AND ')}`:'';
+  const page=Math.max(1,Number(query.page)||1),pageSize=Math.min(100,Math.max(10,Number(query.page_size)||25));
+  const total=db.prepare(`SELECT COUNT(*) total FROM audit_logs ${where}`).get(...params).total;
+  const sql=`SELECT * FROM audit_logs ${where} ORDER BY created_at DESC,id DESC${includePaging?' LIMIT ? OFFSET ?':''}`;
+  const rows=includePaging?db.prepare(sql).all(...params,pageSize,(page-1)*pageSize):db.prepare(`${sql} LIMIT 50000`).all(...params);
+  return{rows,total,page,pageSize,totalPages:Math.max(1,Math.ceil(total/pageSize))};
+}
+app.get('/api/audit', auth, allow('admin'), (req,res)=>{
+  const result=auditQuery(req.query);
+  result.facets={
+    users:db.prepare("SELECT DISTINCT username value FROM audit_logs WHERE username IS NOT NULL AND username<>'' ORDER BY username").all().map(row=>row.value),
+    actions:db.prepare('SELECT DISTINCT action value FROM audit_logs ORDER BY action').all().map(row=>row.value),
+    targetTypes:db.prepare('SELECT DISTINCT target_type value FROM audit_logs ORDER BY target_type').all().map(row=>row.value)
+  };
+  res.json(result);
+});
+function csvSafe(value){const text=String(value??'');const safe=/^[=+\-@\t\r]/.test(text)?`'${text}`:text;return`"${safe.replaceAll('"','""')}"`;}
+app.get('/api/audit.csv', auth, allow('admin'), (req,res)=>{
+  const result=auditQuery(req.query,false);const headers=['时间','用户','动作','对象类型','对象ID','详情'];
+  const csv='\uFEFF'+[headers.map(csvSafe).join(','),...result.rows.map(row=>[row.created_at,row.username,row.action,row.target_type,row.target_id,row.detail].map(csvSafe).join(','))].join('\r\n');
+  audit(req.user,'export','audit_log',null,`导出 ${result.rows.length} 条审计日志`);
+  res.type('text/csv').attachment('sqlark-audit-logs.csv').send(csv);
+});
 app.get('/api/users', auth, allow('admin'), (req, res) => res.json(db.prepare('SELECT id,username,display_name,role,active,failed_attempts,locked_until,created_at FROM users ORDER BY id').all()));
 app.post('/api/users', auth, allow('admin'), (req, res) => {
   const { username, display_name, role, password } = req.body;

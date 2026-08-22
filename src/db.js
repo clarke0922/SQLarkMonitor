@@ -69,6 +69,10 @@ const userColumns = db.prepare('PRAGMA table_info(users)').all().map(column => c
 if (!userColumns.includes('failed_attempts')) db.exec('ALTER TABLE users ADD COLUMN failed_attempts INTEGER NOT NULL DEFAULT 0');
 if (!userColumns.includes('locked_until')) db.exec('ALTER TABLE users ADD COLUMN locked_until TEXT');
 
+const assetColumns = db.prepare('PRAGMA table_info(assets)').all().map(column => column.name);
+if (!assetColumns.includes('database_name')) db.exec('ALTER TABLE assets ADD COLUMN database_name TEXT');
+if (!assetColumns.includes('last_check_detail')) db.exec('ALTER TABLE assets ADD COLUMN last_check_detail TEXT');
+
 if (!db.prepare('SELECT 1 FROM users LIMIT 1').get()) {
   const password = process.env.ADMIN_PASSWORD || 'Admin@123456';
   db.prepare('INSERT INTO users(username,password_hash,display_name,role) VALUES(?,?,?,?)')

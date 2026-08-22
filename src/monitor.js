@@ -6,6 +6,54 @@ const db = require('./db');
 const timeoutMs = Number(process.env.CHECK_TIMEOUT_MS || 5000);
 const threshold = Number(process.env.FAILURE_THRESHOLD || 3);
 let running = false;
+const databaseProtocols = new Set(['mysql', 'postgresql', 'sqlserver', 'oracle']);
+
+function databaseProfiles() {
+  try { return JSON.parse(process.env.DB_CHECK_PROFILES_JSON || '{}'); }
+  catch { throw new Error('DB_CHECK_PROFILES_JSON 不是有效的 JSON'); }
+}
+
+function databaseProfile(asset) {
+  const match = /^profile:\/\/([A-Za-z0-9_-]+)$/.exec(asset.secret_ref || '');
+  if (!match) throw new Error('数据库凭据引用格式无效');
+  const profile = databaseProfiles()[match[1]];
+  if (!profile?.username || !profile?.password) throw new Error(`未找到数据库检查配置：${match[1]}`);
+  return profile;
+}
+
+let databaseAdapters = {
+  mysql: async (asset, profile) => {
+    const mysql = require('mysql2/promise');
+    const connection = await mysql.createConnection({ host:asset.host, port:Number(asset.port), user:profile.username, password:profile.password, database:asset.database_name, connectTimeout:timeoutMs, ssl:profile.ssl });
+    try { const [rows] = await connection.query('SELECT VERSION() AS version'); return `MySQL ${rows[0].version}`; }
+    finally { await connection.end(); }
+  },
+  postgresql: async (asset, profile) => {
+    const { Client } = require('pg');
+    const client = new Client({ host:asset.host, port:Number(asset.port), user:profile.username, password:profile.password, database:asset.database_name, connectionTimeoutMillis:timeoutMs, statement_timeout:timeoutMs, ssl:profile.ssl || false });
+    await client.connect();
+    try { const result = await client.query('SHOW server_version'); return `PostgreSQL ${result.rows[0].server_version}`; }
+    finally { await client.end(); }
+  },
+  sqlserver: async (asset, profile) => {
+    const sql = require('mssql');
+    const pool = new sql.ConnectionPool({ server:asset.host, port:Number(asset.port), user:profile.username, password:profile.password, database:asset.database_name, connectionTimeout:timeoutMs, requestTimeout:timeoutMs, options:{ encrypt:profile.encrypt === true, trustServerCertificate:profile.trustServerCertificate !== false } });
+    await pool.connect();
+    try { const result = await pool.request().query('SELECT CAST(SERVERPROPERTY(\'ProductVersion\') AS varchar(128)) AS version'); return `SQL Server ${result.recordset[0].version}`; }
+    finally { await pool.close(); }
+  },
+  oracle: async (asset, profile) => {
+    const oracledb = require('oracledb');
+    const connection = await oracledb.getConnection({ user:profile.username, password:profile.password, connectString:`${asset.host}:${asset.port}/${asset.database_name}` });
+    connection.callTimeout = timeoutMs;
+    try { const result = await connection.execute("SELECT banner FROM v$version WHERE banner LIKE 'Oracle Database%' AND ROWNUM = 1"); return result.rows?.[0]?.[0] || 'Oracle Database 可用'; }
+    finally { await connection.close(); }
+  }
+};
+
+async function databaseCheck(asset) {
+  return databaseAdapters[asset.protocol](asset, databaseProfile(asset));
+}
 
 function tcpCheck(host, port) {
   return new Promise((resolve, reject) => {
@@ -58,18 +106,20 @@ function resolveAlert(assetId, type) {
 async function checkAsset(asset) {
   const started = Date.now();
   try {
+    let detail = null;
     if (asset.protocol === 'http') await httpCheck(asset.url);
     else if (asset.protocol === 'tcp') await tcpCheck(asset.host, asset.port);
+    else if (databaseProtocols.has(asset.protocol)) detail = await databaseCheck(asset);
     else return;
     const certExpiry = asset.protocol === 'http' ? await certificateExpiry(asset.url) : null;
     db.prepare(`UPDATE assets SET status='online',consecutive_failures=0,last_checked_at=CURRENT_TIMESTAMP,
-      last_latency_ms=?,last_error=NULL,certificate_expires_at=COALESCE(?,certificate_expires_at),updated_at=CURRENT_TIMESTAMP WHERE id=?`)
-      .run(Date.now() - started, certExpiry, asset.id);
+      last_latency_ms=?,last_error=NULL,last_check_detail=?,certificate_expires_at=COALESCE(?,certificate_expires_at),updated_at=CURRENT_TIMESTAMP WHERE id=?`)
+      .run(Date.now() - started, detail, certExpiry, asset.id);
     resolveAlert(asset.id, 'offline');
   } catch (error) {
     const failures = asset.consecutive_failures + 1;
     const status = failures >= threshold ? 'offline' : asset.status;
-    db.prepare('UPDATE assets SET status=?,consecutive_failures=?,last_checked_at=CURRENT_TIMESTAMP,last_error=?,updated_at=CURRENT_TIMESTAMP WHERE id=?')
+    db.prepare('UPDATE assets SET status=?,consecutive_failures=?,last_checked_at=CURRENT_TIMESTAMP,last_error=?,last_check_detail=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?')
       .run(status, failures, String(error.message).slice(0, 500), asset.id);
     if (failures >= threshold) openAlert(asset, 'offline', 'critical', `${asset.name} 连续 ${failures} 次健康检查失败：${error.message}`);
   }
@@ -93,4 +143,6 @@ async function runChecks() {
   } finally { running = false; }
 }
 
-module.exports = { runChecks };
+function setDatabaseAdaptersForTest(overrides) { databaseAdapters = { ...databaseAdapters, ...overrides }; }
+
+module.exports = { runChecks, setDatabaseAdaptersForTest };

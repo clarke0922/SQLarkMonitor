@@ -41,4 +41,10 @@ npm.cmd test
 
 管理员可在“备份与恢复”中创建、下载、上传、恢复和删除 SQLite 备份。恢复前会校验数据库完整性、必要数据表、外键和管理员账号，并自动创建恢复前快照；业务数据在单个事务中恢复，失败时整体回滚。自动备份由 `AUTO_BACKUP_ENABLED`、`AUTO_BACKUP_CRON` 和 `BACKUP_RETENTION` 控制，默认每天凌晨2点执行并保留14份自动备份。
 
-健康检查支持 HTTP/HTTPS 和 TCP。密码、Token 等敏感内容不要录入，只填写公司密码库或 Vault 的引用地址。
+健康检查支持 HTTP/HTTPS、TCP，以及 MySQL、PostgreSQL、SQL Server、Oracle 的真实登录与版本查询。数据库资产只保存 `profile://配置名`，账号密码通过 `.env` 提供，不写入 SQLite：
+
+```env
+DB_CHECK_PROFILES_JSON={"mysql_test":{"username":"monitor_user","password":"请替换"},"oracle_test":{"username":"monitor_user","password":"请替换"}}
+```
+
+数据库检查账号建议仅授予登录和版本查询所需的最小只读权限。MySQL、PostgreSQL、SQL Server、Oracle 默认端口分别为 3306、5432、1433、1521；Oracle 的“数据库名/服务名”填写 Service Name。

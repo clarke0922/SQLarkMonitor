@@ -11,15 +11,19 @@ process.env.JWT_SECRET = 'automated-test-secret';
 process.env.ADMIN_PASSWORD = 'AutomatedTest123!';
 process.env.CHECK_TIMEOUT_MS = '1000';
 process.env.FAILURE_THRESHOLD = '1';
+process.env.DB_CHECK_PROFILES_JSON = JSON.stringify({ mysql_test: { username:'monitor', password:'test-only-password' } });
 
 const { startServer } = require('../src/server');
+const { setDatabaseAdaptersForTest } = require('../src/monitor');
 const db = require('../src/db');
+setDatabaseAdaptersForTest({ mysql: async () => 'MySQL 8.0-test' });
 
 let server;
 let baseUrl;
 let adminToken;
 let assetId;
 let importedAssetId;
+let databaseAssetId;
 
 async function request(url, options = {}) {
   const response = await fetch(`${baseUrl}${url}`, {
@@ -100,6 +104,21 @@ test('手工巡检可将 TCP 资产标记为在线', async () => {
   assert.ok(assets.body[0].last_latency_ms >= 0);
 });
 
+test('MySQL 专项检查使用配置引用、默认端口并记录版本', async () => {
+  const invalid = await request('/api/assets', { method:'POST', token:adminToken, body:JSON.stringify({ name:'无凭据数据库', category:'数据库', owner:'DBA', protocol:'mysql', host:'127.0.0.1', database_name:'sqlark', secret_ref:'明文密码' }) });
+  assert.equal(invalid.response.status,400);
+  const created = await request('/api/assets', { method:'POST', token:adminToken, body:JSON.stringify({ name:'MySQL 测试库', category:'数据库', environment:'测试', owner:'DBA', protocol:'mysql', host:'127.0.0.1', database_name:'sqlark', secret_ref:'profile://mysql_test', enabled:true }) });
+  assert.equal(created.response.status,201);
+  databaseAssetId=created.body.id;
+  await request('/api/checks/run',{method:'POST',token:adminToken,body:'{}'});
+  const listed=await request('/api/assets?q=MySQL',{token:adminToken});
+  assert.equal(listed.body[0].port,3306);
+  assert.equal(listed.body[0].status,'online');
+  assert.equal(listed.body[0].last_check_detail,'MySQL 8.0-test');
+  assert.equal(listed.body[0].secret_ref,'profile://mysql_test');
+  assert.equal(JSON.stringify(listed.body).includes('test-only-password'),false);
+});
+
 test('只读用户不能修改资产或登录页面', async () => {
   const createdUser = await request('/api/users', {
     method: 'POST', token: adminToken,
@@ -176,7 +195,25 @@ test('管理员可编辑登录页面并读取审计记录', async () => {
   assert.match(portal.body.login_html, /rel="noopener noreferrer"/);
   const audit = await request('/api/audit', { token: adminToken });
   assert.equal(audit.response.status, 200);
-  assert.ok(audit.body.length >= 1);
+  assert.ok(audit.body.rows.length >= 1);
+});
+
+test('审计日志支持组合筛选、分页和安全 CSV 导出', async () => {
+  const insert=db.prepare("INSERT INTO audit_logs(username,action,target_type,target_id,detail,created_at) VALUES(?,?,?,?,?,CURRENT_TIMESTAMP)");
+  for(let index=0;index<12;index++)insert.run('filter_user','test_filter','asset',index+1,index===0?'=HYPERLINK("https://evil.example")':`筛选日志 ${index+1}`);
+  const today=new Date().toISOString().slice(0,10);
+  const filtered=await request(`/api/audit?username=filter_user&action=test_filter&target_type=asset&date_from=${today}&date_to=${today}&page=1&page_size=10`,{token:adminToken});
+  assert.equal(filtered.response.status,200);
+  assert.equal(filtered.body.total,12);
+  assert.equal(filtered.body.rows.length,10);
+  assert.equal(filtered.body.totalPages,2);
+  const secondPage=await request('/api/audit?username=filter_user&action=test_filter&page=2&page_size=10',{token:adminToken});
+  assert.equal(secondPage.body.rows.length,2);
+  const csvResponse=await fetch(`${baseUrl}/api/audit.csv?username=filter_user&action=test_filter`,{headers:{Authorization:`Bearer ${adminToken}`}});
+  assert.equal(csvResponse.status,200);
+  const csv=await csvResponse.text();
+  assert.match(csv,/filter_user/);
+  assert.match(csv,/"'=HYPERLINK/);
 });
 
 test('管理员可备份、下载、上传并事务恢复数据库', async () => {
@@ -207,11 +244,12 @@ test('管理员可备份、下载、上传并事务恢复数据库', async () =>
 
 test('仪表盘统计正确，管理员可删除资产', async () => {
   const dashboard = await request('/api/dashboard', { token: adminToken });
-  assert.equal(dashboard.body.totals.total, 2);
-  assert.equal(dashboard.body.totals.online, 1);
+  assert.equal(dashboard.body.totals.total, 3);
+  assert.equal(dashboard.body.totals.online, 2);
   const removed = await request(`/api/assets/${assetId}`, { method: 'DELETE', token: adminToken });
   assert.equal(removed.response.status, 200);
   await request(`/api/assets/${importedAssetId}`, { method: 'DELETE', token: adminToken });
+  await request(`/api/assets/${databaseAssetId}`, { method: 'DELETE', token: adminToken });
   const assets = await request('/api/assets', { token: adminToken });
   assert.equal(assets.body.length, 0);
 });
