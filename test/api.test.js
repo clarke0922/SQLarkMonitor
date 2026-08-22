@@ -14,7 +14,7 @@ process.env.FAILURE_THRESHOLD = '1';
 process.env.DB_CHECK_PROFILES_JSON = JSON.stringify({ mysql_test: { username:'monitor', password:'test-only-password' } });
 
 const { startServer } = require('../src/server');
-const { setDatabaseAdaptersForTest } = require('../src/monitor');
+const { sendFeishu, setDatabaseAdaptersForTest, setNotificationFetchForTest } = require('../src/monitor');
 const db = require('../src/db');
 setDatabaseAdaptersForTest({ mysql: async () => 'MySQL 8.0-test' });
 
@@ -56,6 +56,43 @@ test('公开门户可在未登录时读取', async () => {
   assert.equal(response.status, 200);
   assert.equal(body.login_title, 'SQLark Monitor');
   assert.ok(Array.isArray(body.links));
+});
+
+test('飞书机器人告警支持签名并发送文本消息', async () => {
+  process.env.FEISHU_WEBHOOK_URL='https://open.feishu.cn/open-apis/bot/v2/hook/test';
+  process.env.FEISHU_WEBHOOK_SECRET='test-secret';
+  let request;
+  setNotificationFetchForTest(async (url, options) => { request={url:String(url),options}; return {ok:true,json:async()=>({code:0,msg:'success'})}; });
+  await sendFeishu('[SQLark资产预警] MySQL 测试库','连续 3 次健康检查失败');
+  const body=JSON.parse(request.options.body);
+  assert.equal(request.url,process.env.FEISHU_WEBHOOK_URL);
+  assert.equal(body.msg_type,'text');
+  assert.match(body.content.text,/MySQL 测试库/);
+  assert.ok(body.timestamp);
+  assert.ok(body.sign);
+  delete process.env.FEISHU_WEBHOOK_URL;
+  delete process.env.FEISHU_WEBHOOK_SECRET;
+  setNotificationFetchForTest(fetch);
+});
+
+test('管理员飞书配置优先于环境变量、加密保存并立即生效', async () => {
+  const loggedIn=await login('admin','AutomatedTest123!'),settingsToken=loggedIn.body.token;
+  let message;
+  setNotificationFetchForTest(async (url,options)=>{message=JSON.parse(options.body);return{ok:true,json:async()=>({code:0,msg:'success'})};});
+  const saved=await request('/api/settings/feishu',{method:'PUT',token:settingsToken,body:JSON.stringify({enabled:true,webhook_url:'https://open.feishu.cn/open-apis/bot/v2/hook/admin-test',secret:'admin-secret'})});
+  assert.equal(saved.response.status,200);
+  const settings=await request('/api/settings/feishu',{token:settingsToken});
+  assert.deepEqual(settings.body,{source:'database',enabled:true,webhook_configured:true,secret_configured:true});
+  const stored=db.prepare('SELECT feishu_webhook_url,feishu_secret_encrypted FROM portal_settings WHERE id=1').get();
+  assert.notEqual(stored.feishu_secret_encrypted,'admin-secret');
+  assert.doesNotMatch(stored.feishu_webhook_url,/admin-test/);
+  assert.doesNotMatch(JSON.stringify(settings.body),/admin-secret|admin-test/);
+  const tested=await request('/api/settings/feishu/test',{method:'POST',token:settingsToken,body:'{}'});
+  assert.equal(tested.response.status,200);
+  assert.match(message.content.text,/配置测试/);
+  const restored=await request('/api/settings/feishu',{method:'PUT',token:settingsToken,body:JSON.stringify({use_env:true})});
+  assert.equal(restored.response.status,200);
+  setNotificationFetchForTest(fetch);
 });
 
 test('错误密码被拒绝，管理员可登录', async () => {
@@ -130,6 +167,8 @@ test('只读用户不能修改资产或登录页面', async () => {
   assert.equal(deniedAsset.response.status, 403);
   const deniedPortal = await request('/api/portal/login', { method: 'PUT', token: viewerLogin.body.token, body: JSON.stringify({ login_title: 'x', login_subtitle: 'x', login_html: '<p>x</p>' }) });
   assert.equal(deniedPortal.response.status, 403);
+  const deniedFeishu = await request('/api/settings/feishu', { token:viewerLogin.body.token });
+  assert.equal(deniedFeishu.response.status,403);
 });
 
 test('连续五次密码错误会锁定账号，管理员可解锁', async () => {

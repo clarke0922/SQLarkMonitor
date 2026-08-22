@@ -1,11 +1,13 @@
 const net = require('net');
 const tls = require('tls');
+const crypto = require('crypto');
 const nodemailer = require('nodemailer');
 const db = require('./db');
 
 const timeoutMs = Number(process.env.CHECK_TIMEOUT_MS || 5000);
 const threshold = Number(process.env.FAILURE_THRESHOLD || 3);
 let running = false;
+let notificationFetch = fetch;
 const databaseProtocols = new Set(['mysql', 'postgresql', 'sqlserver', 'oracle']);
 
 function databaseProfiles() {
@@ -92,11 +94,49 @@ async function sendMail(subject, text) {
   await transport.sendMail({ from: process.env.SMTP_FROM, to: process.env.ALERT_RECIPIENTS, subject, text });
 }
 
+function encryptionKey() { return crypto.createHash('sha256').update(process.env.JWT_SECRET || 'dev-only-secret-change-me').digest(); }
+function encryptSecret(value) {
+  if (!value) return null;
+  const iv=crypto.randomBytes(12),cipher=crypto.createCipheriv('aes-256-gcm',encryptionKey(),iv),encrypted=Buffer.concat([cipher.update(value,'utf8'),cipher.final()]);
+  return `v1:${iv.toString('base64')}:${cipher.getAuthTag().toString('base64')}:${encrypted.toString('base64')}`;
+}
+function decryptSecret(value) {
+  if (!value) return '';
+  const [version,iv,tag,encrypted]=value.split(':');
+  if(version!=='v1'||!iv||!tag||!encrypted)throw new Error('飞书签名密钥无法解密');
+  const decipher=crypto.createDecipheriv('aes-256-gcm',encryptionKey(),Buffer.from(iv,'base64'));decipher.setAuthTag(Buffer.from(tag,'base64'));
+  return Buffer.concat([decipher.update(Buffer.from(encrypted,'base64')),decipher.final()]).toString('utf8');
+}
+function feishuConfig() {
+  const row=db.prepare('SELECT feishu_override,feishu_enabled,feishu_webhook_url,feishu_secret_encrypted FROM portal_settings WHERE id=1').get();
+  if(row?.feishu_override)return{source:'database',enabled:row.feishu_enabled===1,url:row.feishu_webhook_url?decryptSecret(row.feishu_webhook_url):(process.env.FEISHU_WEBHOOK_URL||''),secret:row.feishu_secret_encrypted?decryptSecret(row.feishu_secret_encrypted):(process.env.FEISHU_WEBHOOK_SECRET||'')};
+  return{source:process.env.FEISHU_WEBHOOK_URL?'env':'none',enabled:!!process.env.FEISHU_WEBHOOK_URL,url:process.env.FEISHU_WEBHOOK_URL||'',secret:process.env.FEISHU_WEBHOOK_SECRET||''};
+}
+
+async function sendFeishu(subject, text) {
+  const config=feishuConfig();
+  if (!config.enabled || !config.url) return false;
+  const url = new URL(config.url);
+  if (url.protocol !== 'https:' || !['open.feishu.cn','open.larksuite.com'].includes(url.hostname) || !url.pathname.startsWith('/open-apis/bot/v2/hook/')) throw new Error('飞书 Webhook 地址无效');
+  const body = { msg_type:'text', content:{ text:`${subject}\n${text}` } };
+  if (config.secret) {
+    body.timestamp = Math.floor(Date.now() / 1000);
+    body.sign = crypto.createHmac('sha256', `${body.timestamp}\n${config.secret}`).update('').digest('base64');
+  }
+  const response = await notificationFetch(url, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body), signal:AbortSignal.timeout(timeoutMs) });
+  if (!response.ok) throw new Error(`飞书通知 HTTP ${response.status}`);
+  const result = await response.json();
+  if ((result.code != null && result.code !== 0) || (result.StatusCode != null && result.StatusCode !== 0)) throw new Error(`飞书通知失败：${result.msg || result.StatusMessage || '未知错误'}`);
+  return true;
+}
+
 function openAlert(asset, type, severity, message) {
   const exists = db.prepare("SELECT id FROM alerts WHERE asset_id=? AND type=? AND status='open'").get(asset.id, type);
   if (exists) return;
   db.prepare('INSERT INTO alerts(asset_id,type,severity,message) VALUES(?,?,?,?)').run(asset.id, type, severity, message);
-  sendMail(`[SQLark资产预警] ${asset.name}`, message).catch(console.error);
+  const subject = `[SQLark资产预警] ${asset.name}`;
+  sendMail(subject, message).catch(console.error);
+  sendFeishu(subject, message).catch(console.error);
 }
 
 function resolveAlert(assetId, type) {
@@ -144,5 +184,6 @@ async function runChecks() {
 }
 
 function setDatabaseAdaptersForTest(overrides) { databaseAdapters = { ...databaseAdapters, ...overrides }; }
+function setNotificationFetchForTest(fetcher) { notificationFetch = fetcher; }
 
-module.exports = { runChecks, setDatabaseAdaptersForTest };
+module.exports = { runChecks, sendFeishu, feishuConfig, encryptSecret, setDatabaseAdaptersForTest, setNotificationFetchForTest };

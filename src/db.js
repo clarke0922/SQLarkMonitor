@@ -64,6 +64,10 @@ const portalColumns = db.prepare('PRAGMA table_info(portal_settings)').all().map
 if (!portalColumns.includes('login_html')) {
   db.exec("ALTER TABLE portal_settings ADD COLUMN login_html TEXT NOT NULL DEFAULT '<h1>SQLark 测试资源导航</h1><p>统一访问测试部门的代码仓库、制品平台、自动化测试环境和内部系统。</p><h2>使用说明</h2><ul><li>使用右侧账号登录后维护资产和查看预警</li><li>常用系统可从下方快捷入口直接访问</li><li>如需开通权限，请联系测试部门管理员</li></ul>'");
 }
+if (!portalColumns.includes('feishu_override')) db.exec('ALTER TABLE portal_settings ADD COLUMN feishu_override INTEGER NOT NULL DEFAULT 0');
+if (!portalColumns.includes('feishu_enabled')) db.exec('ALTER TABLE portal_settings ADD COLUMN feishu_enabled INTEGER NOT NULL DEFAULT 1');
+if (!portalColumns.includes('feishu_webhook_url')) db.exec('ALTER TABLE portal_settings ADD COLUMN feishu_webhook_url TEXT');
+if (!portalColumns.includes('feishu_secret_encrypted')) db.exec('ALTER TABLE portal_settings ADD COLUMN feishu_secret_encrypted TEXT');
 
 const userColumns = db.prepare('PRAGMA table_info(users)').all().map(column => column.name);
 if (!userColumns.includes('failed_attempts')) db.exec('ALTER TABLE users ADD COLUMN failed_attempts INTEGER NOT NULL DEFAULT 0');

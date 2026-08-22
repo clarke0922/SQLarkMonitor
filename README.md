@@ -39,6 +39,8 @@ Copy-Item .env.example .env
 | `BACKUP_RETENTION` | 自动备份保留份数 | 默认 `14` |
 | `DB_CHECK_PROFILES_JSON` | 数据库专项检查账号配置 | 使用单行合法 JSON，资产只保存 `profile://配置名` |
 | `SMTP_*`、`ALERT_RECIPIENTS` | 邮件告警配置 | 未配置时不发送邮件 |
+| `FEISHU_WEBHOOK_URL` | 飞书群自定义机器人 Webhook | 未配置时不发送飞书告警 |
+| `FEISHU_WEBHOOK_SECRET` | 飞书机器人签名密钥 | 建议在机器人安全设置中启用签名校验 |
 
 数据库检查配置完整示例：
 
@@ -54,6 +56,19 @@ DB_CHECK_PROFILES_JSON={"mysql_qa":{"username":"sqlark_monitor","password":"实�
 - 数据库巡检账号只授予登录和版本查询所需的最小权限，不使用管理员或业务账号。
 - 人员离职、密码泄露或密钥到期时，更新 `.env` 中对应配置并重启服务；资产中的 `profile://` 引用通常无需修改。
 - 新增配置项时同步更新 `.env.example` 和本章节，但示例值不得包含真实地址、账号、密码或 Token。
+
+### 飞书告警
+
+在飞书群中添加“自定义机器人”，复制 Webhook；建议开启签名校验，然后配置：
+
+```env
+FEISHU_WEBHOOK_URL=https://open.feishu.cn/open-apis/bot/v2/hook/请替换
+FEISHU_WEBHOOK_SECRET=请替换为签名密钥
+```
+
+也可以由管理员进入“飞书配置”菜单维护 Webhook、签名密钥并发送测试消息，保存后立即生效，无需重启。管理后台配置优先于 `.env`；点击“恢复 .env 默认值”可清除后台覆盖。Webhook Token 和签名密钥不会回显，并使用由 `JWT_SECRET` 派生的密钥加密保存。
+
+新产生的资产离线、证书到期和维护/许可到期告警会推送到飞书。同一资产同一类型的未解决告警不会重复发送。
 
 ## Docker
 

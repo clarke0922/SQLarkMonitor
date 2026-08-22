@@ -12,7 +12,7 @@ const fs = require('fs');
 const { rateLimit } = require('express-rate-limit');
 const sanitizeHtml = require('sanitize-html');
 const db = require('./db');
-const { runChecks } = require('./monitor');
+const { runChecks, sendFeishu, feishuConfig, encryptSecret } = require('./monitor');
 const backups = require('./backup');
 
 const app = express();
@@ -295,6 +295,26 @@ app.get('/api/audit.csv', auth, allow('admin'), (req,res)=>{
   res.type('text/csv').attachment('sqlark-audit-logs.csv').send(csv);
 });
 app.get('/api/users', auth, allow('admin'), (req, res) => res.json(db.prepare('SELECT id,username,display_name,role,active,failed_attempts,locked_until,created_at FROM users ORDER BY id').all()));
+app.get('/api/settings/feishu', auth, allow('admin'), (req,res)=>{
+  const config=feishuConfig();
+  res.json({source:config.source,enabled:config.enabled,webhook_configured:!!config.url,secret_configured:!!config.secret});
+});
+app.put('/api/settings/feishu', auth, allow('admin'), (req,res)=>{
+  try{
+    if(req.body.use_env){db.prepare('UPDATE portal_settings SET feishu_override=0,feishu_webhook_url=NULL,feishu_secret_encrypted=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=1').run();audit(req.user,'update','feishu_settings',1,'恢复 .env 默认配置');return res.json({ok:true});}
+    const current=db.prepare('SELECT feishu_webhook_url,feishu_secret_encrypted FROM portal_settings WHERE id=1').get();
+    const webhook=String(req.body.webhook_url||'').trim();
+    if(webhook){const url=new URL(webhook);if(url.protocol!=='https:'||!['open.feishu.cn','open.larksuite.com'].includes(url.hostname)||!url.pathname.startsWith('/open-apis/bot/v2/hook/'))return res.status(400).json({error:'请输入有效的飞书群机器人 Webhook 地址'});}
+    const encryptedWebhook=webhook?encryptSecret(webhook):current.feishu_webhook_url;
+    const encrypted=req.body.clear_secret?null:(req.body.secret?encryptSecret(String(req.body.secret)):current.feishu_secret_encrypted);
+    db.prepare('UPDATE portal_settings SET feishu_override=1,feishu_enabled=?,feishu_webhook_url=?,feishu_secret_encrypted=?,updated_at=CURRENT_TIMESTAMP WHERE id=1').run(req.body.enabled===false?0:1,encryptedWebhook||null,encrypted);
+    audit(req.user,'update','feishu_settings',1,`飞书告警${req.body.enabled===false?'停用':'启用'}`);res.json({ok:true});
+  }catch(error){res.status(400).json({error:error.message});}
+});
+app.post('/api/settings/feishu/test', auth, allow('admin'), async (req,res)=>{
+  try{const sent=await sendFeishu('[SQLark Monitor] 飞书配置测试',`测试消息发送成功，操作人：${req.user.displayName}`);if(!sent)return res.status(400).json({error:'飞书告警未启用或未配置 Webhook'});audit(req.user,'test','feishu_settings',1,'发送测试消息');res.json({ok:true});}
+  catch(error){res.status(400).json({error:error.message});}
+});
 app.post('/api/users', auth, allow('admin'), (req, res) => {
   const { username, display_name, role, password } = req.body;
   if (!/^\w{3,32}$/.test(username || '') || !display_name || !['admin','editor','viewer'].includes(role) || String(password || '').length < 10)
