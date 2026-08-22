@@ -33,4 +33,8 @@ npm.cmd test
 
 测试会启动随机本地端口并使用独立临时 SQLite 数据库，不会修改正式数据。GitHub Actions 会在推送到 `main` 或创建 Pull Request 时自动运行全部测试。
 
+## 登录安全
+
+登录使用一次性图形验证码；同一账号连续失败达到 `LOGIN_MAX_ATTEMPTS` 后会锁定 `ACCOUNT_LOCK_MINUTES` 分钟，同一 IP 每15分钟最多尝试 `LOGIN_RATE_LIMIT` 次。管理员可以在“用户管理”查看失败次数并手工解锁账号。
+
 健康检查支持 HTTP/HTTPS 和 TCP。密码、Token 等敏感内容不要录入，只填写公司密码库或 Vault 的引用地址。

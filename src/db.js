@@ -65,6 +65,10 @@ if (!portalColumns.includes('login_html')) {
   db.exec("ALTER TABLE portal_settings ADD COLUMN login_html TEXT NOT NULL DEFAULT '<h1>SQLark 测试资源导航</h1><p>统一访问测试部门的代码仓库、制品平台、自动化测试环境和内部系统。</p><h2>使用说明</h2><ul><li>使用右侧账号登录后维护资产和查看预警</li><li>常用系统可从下方快捷入口直接访问</li><li>如需开通权限，请联系测试部门管理员</li></ul>'");
 }
 
+const userColumns = db.prepare('PRAGMA table_info(users)').all().map(column => column.name);
+if (!userColumns.includes('failed_attempts')) db.exec('ALTER TABLE users ADD COLUMN failed_attempts INTEGER NOT NULL DEFAULT 0');
+if (!userColumns.includes('locked_until')) db.exec('ALTER TABLE users ADD COLUMN locked_until TEXT');
+
 if (!db.prepare('SELECT 1 FROM users LIMIT 1').get()) {
   const password = process.env.ADMIN_PASSWORD || 'Admin@123456';
   db.prepare('INSERT INTO users(username,password_hash,display_name,role) VALUES(?,?,?,?)')

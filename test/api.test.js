@@ -5,6 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 
 const testDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sqlark-monitor-test-'));
+process.env.NODE_ENV = 'test';
 process.env.DATA_DIR = testDataDir;
 process.env.JWT_SECRET = 'automated-test-secret';
 process.env.ADMIN_PASSWORD = 'AutomatedTest123!';
@@ -29,6 +30,11 @@ async function request(url, options = {}) {
   return { response, body };
 }
 
+async function login(username, password) {
+  const captcha = await request('/api/captcha');
+  return request('/api/login', { method: 'POST', body: JSON.stringify({ username, password, captcha_id: captcha.body.id, captcha_answer: 'TEST12' }) });
+}
+
 before(async () => {
   server = startServer(0, { scheduleChecks: false, initialCheck: false });
   await new Promise(resolve => server.once('listening', resolve));
@@ -49,9 +55,14 @@ test('公开门户可在未登录时读取', async () => {
 });
 
 test('错误密码被拒绝，管理员可登录', async () => {
-  const failed = await request('/api/login', { method: 'POST', body: JSON.stringify({ username: 'admin', password: 'wrong-password' }) });
+  const challenge = await request('/api/captcha');
+  const invalidCaptcha = await request('/api/login', { method: 'POST', body: JSON.stringify({ username: 'admin', password: 'AutomatedTest123!', captcha_id: challenge.body.id, captcha_answer: 'WRONG1' }) });
+  assert.equal(invalidCaptcha.response.status, 400);
+  const reusedCaptcha = await request('/api/login', { method: 'POST', body: JSON.stringify({ username: 'admin', password: 'AutomatedTest123!', captcha_id: challenge.body.id, captcha_answer: 'TEST12' }) });
+  assert.equal(reusedCaptcha.response.status, 400);
+  const failed = await login('admin', 'wrong-password');
   assert.equal(failed.response.status, 401);
-  const success = await request('/api/login', { method: 'POST', body: JSON.stringify({ username: 'admin', password: 'AutomatedTest123!' }) });
+  const success = await login('admin', 'AutomatedTest123!');
   assert.equal(success.response.status, 200);
   assert.equal(success.body.user.role, 'admin');
   adminToken = success.body.token;
@@ -95,11 +106,32 @@ test('只读用户不能修改资产或登录页面', async () => {
     body: JSON.stringify({ username: 'test_viewer', display_name: '测试只读用户', role: 'viewer', password: 'ViewerTest123!' })
   });
   assert.equal(createdUser.response.status, 201);
-  const login = await request('/api/login', { method: 'POST', body: JSON.stringify({ username: 'test_viewer', password: 'ViewerTest123!' }) });
-  const deniedAsset = await request('/api/assets', { method: 'POST', token: login.body.token, body: JSON.stringify({ name: '越权资产', category: '其他', owner: 'viewer' }) });
+  const viewerLogin = await login('test_viewer', 'ViewerTest123!');
+  const deniedAsset = await request('/api/assets', { method: 'POST', token: viewerLogin.body.token, body: JSON.stringify({ name: '越权资产', category: '其他', owner: 'viewer' }) });
   assert.equal(deniedAsset.response.status, 403);
-  const deniedPortal = await request('/api/portal/login', { method: 'PUT', token: login.body.token, body: JSON.stringify({ login_title: 'x', login_subtitle: 'x', login_html: '<p>x</p>' }) });
+  const deniedPortal = await request('/api/portal/login', { method: 'PUT', token: viewerLogin.body.token, body: JSON.stringify({ login_title: 'x', login_subtitle: 'x', login_html: '<p>x</p>' }) });
   assert.equal(deniedPortal.response.status, 403);
+});
+
+test('连续五次密码错误会锁定账号，管理员可解锁', async () => {
+  const created = await request('/api/users', { method: 'POST', token: adminToken, body: JSON.stringify({ username: 'lock_test', display_name: '锁定测试', role: 'viewer', password: 'LockTestPass123!' }) });
+  assert.equal(created.response.status, 201);
+  for (let index=0; index<4; index++) {
+    const failed = await login('lock_test', 'wrong-password');
+    assert.equal(failed.response.status, 401);
+  }
+  const locked = await login('lock_test', 'wrong-password');
+  assert.equal(locked.response.status, 423);
+  assert.equal(locked.body.code, 'ACCOUNT_LOCKED');
+  const correctButLocked = await login('lock_test', 'LockTestPass123!');
+  assert.equal(correctButLocked.response.status, 423);
+  const users = await request('/api/users', { token: adminToken });
+  const target = users.body.find(item => item.username === 'lock_test');
+  assert.ok(target.locked_until);
+  const unlocked = await request(`/api/users/${target.id}/unlock`, { method: 'POST', token: adminToken, body: '{}' });
+  assert.equal(unlocked.response.status, 200);
+  const successful = await login('lock_test', 'LockTestPass123!');
+  assert.equal(successful.response.status, 200);
 });
 
 test('CSV 文件可预览并以事务方式批量导入', async () => {
@@ -153,4 +185,11 @@ test('仪表盘统计正确，管理员可删除资产', async () => {
   await request(`/api/assets/${importedAssetId}`, { method: 'DELETE', token: adminToken });
   const assets = await request('/api/assets', { token: adminToken });
   assert.equal(assets.body.length, 0);
+});
+
+test('同一 IP 超过登录频率上限会被限流', async () => {
+  let last;
+  for (let index=0; index<9; index++) last=await login('missing_user','wrong-password');
+  assert.equal(last.response.status,429);
+  assert.match(last.body.error,/频繁/);
 });

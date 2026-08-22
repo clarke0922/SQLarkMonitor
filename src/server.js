@@ -7,12 +7,38 @@ const cron = require('node-cron');
 const ExcelJS = require('exceljs');
 const multer = require('multer');
 const { Readable } = require('stream');
+const crypto = require('crypto');
+const { rateLimit } = require('express-rate-limit');
 const db = require('./db');
 const { runChecks } = require('./monitor');
 
 const app = express();
 const secret = process.env.JWT_SECRET || 'dev-only-secret-change-me';
+const loginMaxAttempts = Math.max(3, Number(process.env.LOGIN_MAX_ATTEMPTS || 5));
+const accountLockMinutes = Math.max(1, Number(process.env.ACCOUNT_LOCK_MINUTES || 15));
+const loginRateLimit = Math.max(loginMaxAttempts + 1, Number(process.env.LOGIN_RATE_LIMIT || 20));
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024, files: 1 } });
+const captchaChallenges = new Map();
+const captchaChars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const loginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: loginRateLimit, standardHeaders: 'draft-8', legacyHeaders: false, message: { error: '登录尝试过于频繁，请15分钟后重试' } });
+const captchaLimiter = rateLimit({ windowMs: 60 * 1000, limit: 60, standardHeaders: 'draft-8', legacyHeaders: false, message: { error: '验证码请求过于频繁，请稍后重试' } });
+
+function captchaHash(id, answer) { return crypto.createHmac('sha256', secret).update(`${id}:${String(answer).toUpperCase()}`).digest('hex'); }
+function escapeSvg(value) { return String(value).replace(/[&<>"']/g, character => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&apos;'}[character])); }
+function createCaptcha() {
+  const id = crypto.randomUUID();
+  const answer = process.env.NODE_ENV === 'test' ? 'TEST12' : Array.from({length:6},()=>captchaChars[crypto.randomInt(captchaChars.length)]).join('');
+  captchaChallenges.set(id, { hash:captchaHash(id,answer), expiresAt:Date.now()+5*60*1000 });
+  const glyphs = [...answer].map((char,index)=>`<text x="${20+index*24}" y="39" transform="rotate(${crypto.randomInt(-12,13)} ${20+index*24} 39)">${escapeSvg(char)}</text>`).join('');
+  const lines = Array.from({length:5},()=>`<line x1="${crypto.randomInt(0,180)}" y1="${crypto.randomInt(0,55)}" x2="${crypto.randomInt(0,180)}" y2="${crypto.randomInt(0,55)}"/>`).join('');
+  const svg=`<svg xmlns="http://www.w3.org/2000/svg" width="180" height="55" viewBox="0 0 180 55"><rect width="180" height="55" rx="8" fill="#f1f4fb"/><g stroke="#9eabd1" stroke-width="1">${lines}</g><g font-family="monospace" font-size="27" font-weight="700" fill="#26355a">${glyphs}</g></svg>`;
+  return {id,image:`data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`};
+}
+function verifyCaptcha(id, answer) {
+  const challenge=captchaChallenges.get(id); captchaChallenges.delete(id);
+  if(!challenge||challenge.expiresAt<Date.now()||!answer)return false;
+  const actual=captchaHash(id,answer); return crypto.timingSafeEqual(Buffer.from(actual),Buffer.from(challenge.hash));
+}
 app.use(express.json({ limit: '1mb' }));
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
@@ -28,10 +54,25 @@ function audit(user, action, targetType, targetId, detail = '') {
     .run(user.id, user.username, action, targetType, targetId || null, detail);
 }
 
-app.post('/api/login', (req, res) => {
+app.get('/api/captcha', captchaLimiter, (req,res)=>{
+  const now=Date.now(); for(const [id,value] of captchaChallenges)if(value.expiresAt<now)captchaChallenges.delete(id);
+  res.set('Cache-Control','no-store').json(createCaptcha());
+});
+app.post('/api/login', loginLimiter, (req, res) => {
+  if(!verifyCaptcha(req.body.captcha_id,req.body.captcha_answer))return res.status(400).json({error:'验证码错误或已失效',code:'CAPTCHA_INVALID'});
   const user = db.prepare('SELECT * FROM users WHERE username=? AND active=1').get(req.body.username);
-  if (!user || !bcrypt.compareSync(req.body.password || '', user.password_hash)) return res.status(401).json({ error: '用户名或密码错误' });
+  if(user?.locked_until&&new Date(user.locked_until).getTime()>Date.now()){
+    const retryAfterSeconds=Math.ceil((new Date(user.locked_until).getTime()-Date.now())/1000);
+    return res.status(423).json({error:`账号已锁定，请在 ${Math.ceil(retryAfterSeconds/60)} 分钟后重试`,code:'ACCOUNT_LOCKED',retryAfterSeconds});
+  }
+  const passwordMatches=user?bcrypt.compareSync(req.body.password||'',user.password_hash):bcrypt.compareSync(req.body.password||'','$2b$12$uP4J5Dwjhnakz1Iul7l0nexPc/n5jUmnmSlzwxE5PMyYQXoe1LgRG');
+  if(!user||!passwordMatches){
+    if(user){const attempts=user.failed_attempts+1;const locked=attempts>=loginMaxAttempts;const lockedUntil=locked?new Date(Date.now()+accountLockMinutes*60*1000).toISOString():null;db.prepare('UPDATE users SET failed_attempts=?,locked_until=? WHERE id=?').run(attempts,lockedUntil,user.id);audit({id:user.id,username:user.username},locked?'login_locked':'login_failed','user',user.id,`连续失败 ${attempts} 次`);if(locked)return res.status(423).json({error:`密码连续错误${loginMaxAttempts}次，账号已锁定${accountLockMinutes}分钟`,code:'ACCOUNT_LOCKED',retryAfterSeconds:accountLockMinutes*60});}
+    return res.status(401).json({error:'用户名或密码错误',code:'INVALID_CREDENTIALS'});
+  }
+  db.prepare('UPDATE users SET failed_attempts=0,locked_until=NULL WHERE id=?').run(user.id);
   const profile = { id: user.id, username: user.username, displayName: user.display_name, role: user.role };
+  audit(profile,'login_success','user',user.id,'登录成功');
   res.json({ token: jwt.sign(profile, secret, { expiresIn: '12h' }), user: profile });
 });
 
@@ -207,7 +248,7 @@ app.post('/api/alerts/:id/resolve', auth, allow('admin','editor'), (req, res) =>
   audit(req.user,'resolve','alert',Number(req.params.id)); res.json({ok:true});
 });
 app.get('/api/audit', auth, allow('admin'), (req, res) => res.json(db.prepare('SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 200').all()));
-app.get('/api/users', auth, allow('admin'), (req, res) => res.json(db.prepare('SELECT id,username,display_name,role,active,created_at FROM users ORDER BY id').all()));
+app.get('/api/users', auth, allow('admin'), (req, res) => res.json(db.prepare('SELECT id,username,display_name,role,active,failed_attempts,locked_until,created_at FROM users ORDER BY id').all()));
 app.post('/api/users', auth, allow('admin'), (req, res) => {
   const { username, display_name, role, password } = req.body;
   if (!/^\w{3,32}$/.test(username || '') || !display_name || !['admin','editor','viewer'].includes(role) || String(password || '').length < 10)
@@ -223,6 +264,10 @@ app.put('/api/users/:id', auth, allow('admin'), (req, res) => {
   db.prepare(`UPDATE users SET display_name=?,role=?,active=?,password_hash=CASE WHEN ?='' THEN password_hash ELSE ? END WHERE id=?`)
     .run(display_name,role,active===false?0:1,password||'',password?bcrypt.hashSync(password,12):'',req.params.id);
   audit(req.user,'update','user',Number(req.params.id)); res.json({ok:true});
+});
+app.post('/api/users/:id/unlock', auth, allow('admin'), (req,res)=>{
+  const target=db.prepare('SELECT username FROM users WHERE id=?').get(req.params.id);if(!target)return res.status(404).json({error:'用户不存在'});
+  db.prepare('UPDATE users SET failed_attempts=0,locked_until=NULL WHERE id=?').run(req.params.id);audit(req.user,'unlock','user',Number(req.params.id),target.username);res.json({ok:true});
 });
 app.get('/api/assets.csv', auth, (req, res) => {
   const rows = db.prepare('SELECT name,category,environment,owner,department,url,host,port,status,tags,maintenance_expires_at FROM assets ORDER BY id').all();
