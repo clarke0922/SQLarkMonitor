@@ -4,11 +4,15 @@ const path = require('path');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const cron = require('node-cron');
+const ExcelJS = require('exceljs');
+const multer = require('multer');
+const { Readable } = require('stream');
 const db = require('./db');
 const { runChecks } = require('./monitor');
 
 const app = express();
 const secret = process.env.JWT_SECRET || 'dev-only-secret-change-me';
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024, files: 1 } });
 app.use(express.json({ limit: '1mb' }));
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
@@ -82,6 +86,85 @@ app.get('/api/assets', auth, (req, res) => {
     AND (?='' OR category=?) ORDER BY updated_at DESC`).all(q,q,q,q,category,category));
 });
 
+const importColumns = [
+  ['name','资产名称'],['category','资产分类'],['environment','所属环境'],['owner','负责人'],['department','部门'],
+  ['protocol','检查方式'],['url','访问URL'],['host','主机地址'],['port','端口'],['tags','标签'],
+  ['maintenance_expires_at','维护/许可到期日'],['secret_ref','密码库引用'],['description','说明'],['enabled','启用巡检']
+];
+const headerAliases = new Map(importColumns.flatMap(([key,label]) => [[key,key],[label,key]]));
+
+function normalizeImportRow(raw, rowNumber) {
+  const row = {};
+  for (const [header, value] of Object.entries(raw)) {
+    const key = headerAliases.get(String(header).trim());
+    if (key) row[key] = value == null ? '' : String(value).trim();
+  }
+  row.category ||= '其他'; row.environment ||= '测试'; row.department ||= '测试部'; row.protocol ||= 'none';
+  row.enabled = !['否','false','0','停用'].includes(String(row.enabled || '是').toLowerCase());
+  row.port = row.port ? Number(row.port) : null;
+  row.maintenance_expires_at = row.maintenance_expires_at ? String(row.maintenance_expires_at).slice(0,10) : null;
+  const errors = [];
+  try { assetValues(row); } catch (error) { errors.push(error.message); }
+  return { rowNumber, data: row, errors };
+}
+
+async function parseImportFile(file) {
+  if (!file) throw new Error('请选择 CSV 或 Excel 文件');
+  const extension = String(file.originalname).toLowerCase().split('.').pop();
+  if (!['csv','xlsx'].includes(extension)) throw new Error('仅支持 .csv 和 .xlsx 文件');
+  const workbook = new ExcelJS.Workbook();
+  if (extension === 'csv') await workbook.csv.read(Readable.from(file.buffer));
+  else await workbook.xlsx.load(file.buffer);
+  const sheet = workbook.worksheets[0];
+  if (!sheet || sheet.rowCount < 2) throw new Error('文件中没有可导入的数据');
+  const headers = sheet.getRow(1).values.slice(1).map(value => String(value || '').trim());
+  if (!headers.some(header => headerAliases.has(header))) throw new Error('表头不匹配，请先下载导入模板');
+  const rows = [];
+  sheet.eachRow((excelRow, number) => {
+    if (number === 1) return;
+    const raw = {}; let hasValue = false;
+    headers.forEach((header,index) => { const value=excelRow.getCell(index+1).value; const cellValue=value?.text ?? value?.result ?? value; const normalized=cellValue instanceof Date?cellValue.toISOString().slice(0,10):cellValue; raw[header]=normalized; if(normalized!==null&&normalized!==undefined&&String(normalized).trim()!=='')hasValue=true; });
+    if (hasValue) rows.push(normalizeImportRow(raw, number));
+  });
+  if (rows.length > 1000) throw new Error('单次最多导入1000条资产');
+  const existing = new Set(db.prepare('SELECT lower(name) name FROM assets').all().map(item => item.name));
+  const seen = new Set();
+  for (const item of rows) {
+    const name = String(item.data.name || '').toLowerCase();
+    if (name && (existing.has(name) || seen.has(name))) item.errors.push('资产名称已存在');
+    seen.add(name);
+  }
+  return rows;
+}
+
+app.get('/api/assets/import/template', auth, allow('admin','editor'), async (req, res) => {
+  const workbook = new ExcelJS.Workbook(); const sheet = workbook.addWorksheet('资产导入模板');
+  sheet.columns = importColumns.map(([key,label]) => ({ header: label, key, width: Math.max(14,label.length*2+4) }));
+  sheet.getRow(1).font = { bold:true, color:{argb:'FFFFFFFF'} }; sheet.getRow(1).fill = { type:'pattern',pattern:'solid',fgColor:{argb:'FF4666F6'} };
+  sheet.addRow({ name:'示例：测试 GitLab',category:'代码/制品平台',environment:'测试',owner:'张三',department:'测试部',protocol:'http',url:'https://gitlab.example.com',tags:'核心,代码仓库',maintenance_expires_at:'2027-12-31',secret_ref:'vault://sqlark/gitlab',description:'请删除示例行后填写',enabled:'是' });
+  sheet.views = [{state:'frozen',ySplit:1}]; sheet.autoFilter = {from:'A1',to:'N1'};
+  const buffer = await workbook.xlsx.writeBuffer();
+  res.attachment('sqlark-assets-import-template.xlsx').type('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet').send(Buffer.from(buffer));
+});
+
+app.post('/api/assets/import/preview', auth, allow('admin','editor'), upload.single('file'), async (req, res) => {
+  try { const rows=await parseImportFile(req.file); res.json({rows,total:rows.length,valid:rows.filter(x=>!x.errors.length).length,errors:rows.filter(x=>x.errors.length).length}); }
+  catch(error){res.status(400).json({error:error.message});}
+});
+
+app.post('/api/assets/import', auth, allow('admin','editor'), (req, res) => {
+  const rows = Array.isArray(req.body.rows) ? req.body.rows : [];
+  if (!rows.length || rows.length > 1000) return res.status(400).json({error:'导入数据为空或超过1000条'});
+  const normalized = rows.map((row,index)=>normalizeImportRow(row,index+2));
+  const existing = new Set(db.prepare('SELECT lower(name) name FROM assets').all().map(item=>item.name)); const seen=new Set();
+  for(const item of normalized){const name=String(item.data.name||'').toLowerCase();if(name&&(existing.has(name)||seen.has(name)))item.errors.push('资产名称已存在');seen.add(name);}
+  const invalid = normalized.filter(item=>item.errors.length);
+  if(invalid.length) return res.status(400).json({error:'导入数据校验失败，未写入任何资产',rows:normalized});
+  const insert = db.prepare(`INSERT INTO assets(name,category,environment,owner,department,url,host,port,protocol,description,secret_ref,tags,maintenance_expires_at,enabled) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+  const transaction = db.transaction(items=>{for(const item of items)insert.run(...assetValues(item.data));});
+  transaction(normalized); audit(req.user,'import','assets',null,`批量导入 ${normalized.length} 条资产`); res.status(201).json({imported:normalized.length});
+});
+
 function assetValues(body) {
   const validCategories = ['应用系统','代码/制品平台','自动化平台','数据库','服务器','其他'];
   if (!body.name?.trim() || !body.owner?.trim()) throw new Error('资产名称和负责人必填');
@@ -149,7 +232,26 @@ app.get('/api/assets.csv', auth, (req, res) => {
   res.type('text/csv').attachment('sqlark-assets.csv').send(csv);
 });
 
-const minutes = Math.max(1, Number(process.env.CHECK_INTERVAL_MINUTES || 5));
-cron.schedule(`*/${minutes} * * * *`, () => runChecks().catch(console.error));
-const port = Number(process.env.PORT || 3000);
-app.listen(port, () => { console.log(`SQLark Monitor: http://localhost:${port}`); runChecks().catch(console.error); });
+app.use((error, req, res, next) => {
+  if (error instanceof multer.MulterError) return res.status(400).json({ error: error.code === 'LIMIT_FILE_SIZE' ? '文件不能超过5MB' : `文件上传失败：${error.message}` });
+  if (error) return res.status(500).json({ error: '服务器处理请求失败' });
+  next();
+});
+
+function startServer(port = Number(process.env.PORT || 3000), options = {}) {
+  const { scheduleChecks = true, initialCheck = true } = options;
+  if (scheduleChecks) {
+    const minutes = Math.max(1, Number(process.env.CHECK_INTERVAL_MINUTES || 5));
+    cron.schedule(`*/${minutes} * * * *`, () => runChecks().catch(console.error));
+  }
+  const server = app.listen(port, () => {
+    const actualPort = server.address()?.port || port;
+    console.log(`SQLark Monitor: http://localhost:${actualPort}`);
+    if (initialCheck) runChecks().catch(console.error);
+  });
+  return server;
+}
+
+if (require.main === module) startServer();
+
+module.exports = { app, startServer };

@@ -21,4 +21,16 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
+## CSV / Excel 批量导入
+
+在“资产台账”点击“下载导入模板”，填写后通过“批量导入”上传 `.csv` 或 `.xlsx` 文件。系统会先预览并校验全部行；只有整批数据都通过校验后才会以事务方式写入，单次最多1000条、文件最大5MB。
+
+## 自动化测试
+
+```powershell
+npm.cmd test
+```
+
+测试会启动随机本地端口并使用独立临时 SQLite 数据库，不会修改正式数据。GitHub Actions 会在推送到 `main` 或创建 Pull Request 时自动运行全部测试。
+
 健康检查支持 HTTP/HTTPS 和 TCP。密码、Token 等敏感内容不要录入，只填写公司密码库或 Vault 的引用地址。
