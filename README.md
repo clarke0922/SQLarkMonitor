@@ -14,6 +14,47 @@ npm.cmd start
 
 访问 <http://localhost:3000>，初始账号 `admin`，密码由 `ADMIN_PASSWORD` 配置（示例为 `Admin@123456`）。首次登录后请在“用户管理”中修改管理员密码；生产环境务必修改 `JWT_SECRET`。
 
+## `.env` 配置与维护
+
+首次运行先从模板创建本地配置：
+
+```powershell
+Copy-Item .env.example .env
+```
+
+| 配置项 | 用途 | 维护建议 |
+|---|---|---|
+| `PORT` | Web 服务端口 | 默认 `3000` |
+| `DATA_DIR` | SQLite、备份等数据目录 | 生产环境使用持久化磁盘并定期备份 |
+| `JWT_SECRET` | 登录令牌签名密钥 | 生产环境改为随机长字符串，泄露后立即轮换 |
+| `ADMIN_PASSWORD` | 首次初始化管理员密码 | 首次登录后在用户管理中修改 |
+| `CHECK_INTERVAL_MINUTES` | 自动巡检间隔（分钟） | 根据资产数量调整 |
+| `CHECK_TIMEOUT_MS` | 单次巡检超时（毫秒） | 默认 `5000` |
+| `FAILURE_THRESHOLD` | 连续失败多少次后标记离线 | 默认 `3` |
+| `LOGIN_MAX_ATTEMPTS` | 账号锁定前允许的连续失败次数 | 默认 `5` |
+| `ACCOUNT_LOCK_MINUTES` | 账号锁定时间（分钟） | 默认 `15` |
+| `LOGIN_RATE_LIMIT` | 同一 IP 每15分钟登录次数上限 | 默认 `20` |
+| `AUTO_BACKUP_ENABLED` | 是否启用自动备份 | `true` 或 `false` |
+| `AUTO_BACKUP_CRON` | 自动备份 Cron 表达式 | 默认每天凌晨2点 |
+| `BACKUP_RETENTION` | 自动备份保留份数 | 默认 `14` |
+| `DB_CHECK_PROFILES_JSON` | 数据库专项检查账号配置 | 使用单行合法 JSON，资产只保存 `profile://配置名` |
+| `SMTP_*`、`ALERT_RECIPIENTS` | 邮件告警配置 | 未配置时不发送邮件 |
+
+数据库检查配置完整示例：
+
+```env
+DB_CHECK_PROFILES_JSON={"mysql_qa":{"username":"sqlark_monitor","password":"实际密码"},"postgres_qa":{"username":"sqlark_monitor","password":"实际密码"},"sqlserver_qa":{"username":"sqlark_monitor","password":"实际密码"},"oracle_qa":{"username":"sqlark_monitor","password":"实际密码"}}
+```
+
+新增资产时分别引用 `profile://mysql_qa`、`profile://postgres_qa`、`profile://sqlserver_qa` 或 `profile://oracle_qa`。修改 `.env` 后必须重启服务才能生效。
+
+维护规则：
+
+- `.env` 包含密码和密钥，禁止提交到 Git；仓库只维护不含真实凭据的 `.env.example`。
+- 数据库巡检账号只授予登录和版本查询所需的最小权限，不使用管理员或业务账号。
+- 人员离职、密码泄露或密钥到期时，更新 `.env` 中对应配置并重启服务；资产中的 `profile://` 引用通常无需修改。
+- 新增配置项时同步更新 `.env.example` 和本章节，但示例值不得包含真实地址、账号、密码或 Token。
+
 ## Docker
 
 ```bash
@@ -41,10 +82,4 @@ npm.cmd test
 
 管理员可在“备份与恢复”中创建、下载、上传、恢复和删除 SQLite 备份。恢复前会校验数据库完整性、必要数据表、外键和管理员账号，并自动创建恢复前快照；业务数据在单个事务中恢复，失败时整体回滚。自动备份由 `AUTO_BACKUP_ENABLED`、`AUTO_BACKUP_CRON` 和 `BACKUP_RETENTION` 控制，默认每天凌晨2点执行并保留14份自动备份。
 
-健康检查支持 HTTP/HTTPS、TCP，以及 MySQL、PostgreSQL、SQL Server、Oracle 的真实登录与版本查询。数据库资产只保存 `profile://配置名`，账号密码通过 `.env` 提供，不写入 SQLite：
-
-```env
-DB_CHECK_PROFILES_JSON={"mysql_test":{"username":"monitor_user","password":"请替换"},"oracle_test":{"username":"monitor_user","password":"请替换"}}
-```
-
-数据库检查账号建议仅授予登录和版本查询所需的最小只读权限。MySQL、PostgreSQL、SQL Server、Oracle 默认端口分别为 3306、5432、1433、1521；Oracle 的“数据库名/服务名”填写 Service Name。
+健康检查支持 HTTP/HTTPS、TCP，以及 MySQL、PostgreSQL、SQL Server、Oracle 的真实登录与版本查询。数据库资产只保存 `profile://配置名`，账号密码通过 `.env` 提供，不写入 SQLite。MySQL、PostgreSQL、SQL Server、Oracle 默认端口分别为 3306、5432、1433、1521；Oracle 的“数据库名/服务名”填写 Service Name。配置方法见上方的 `.env` 配置与维护章节。
