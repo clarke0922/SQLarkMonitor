@@ -37,4 +37,8 @@ npm.cmd test
 
 登录使用一次性图形验证码；同一账号连续失败达到 `LOGIN_MAX_ATTEMPTS` 后会锁定 `ACCOUNT_LOCK_MINUTES` 分钟，同一 IP 每15分钟最多尝试 `LOGIN_RATE_LIMIT` 次。管理员可以在“用户管理”查看失败次数并手工解锁账号。
 
+## 数据库备份与恢复
+
+管理员可在“备份与恢复”中创建、下载、上传、恢复和删除 SQLite 备份。恢复前会校验数据库完整性、必要数据表、外键和管理员账号，并自动创建恢复前快照；业务数据在单个事务中恢复，失败时整体回滚。自动备份由 `AUTO_BACKUP_ENABLED`、`AUTO_BACKUP_CRON` 和 `BACKUP_RETENTION` 控制，默认每天凌晨2点执行并保留14份自动备份。
+
 健康检查支持 HTTP/HTTPS 和 TCP。密码、Token 等敏感内容不要录入，只填写公司密码库或 Vault 的引用地址。

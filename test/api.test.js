@@ -165,15 +165,44 @@ test('CSV 文件可预览并以事务方式批量导入', async () => {
 test('管理员可编辑登录页面并读取审计记录', async () => {
   const saved = await request('/api/portal/login', {
     method: 'PUT', token: adminToken,
-    body: JSON.stringify({ login_title: 'SQLark QA', login_subtitle: '自动化测试门户', login_html: '<h1>欢迎</h1><script>alert(1)</script><p>安全内容</p>' })
+    body: JSON.stringify({ login_title: 'SQLark QA', login_subtitle: '自动化测试门户', login_html: '<h1 style="color:red">欢迎</h1><script>alert(1)</script><img src=x onerror=alert(1)><iframe src="https://evil.example"></iframe><a href="javascript:alert(1)" onclick="alert(2)">危险链接</a><a href="https://example.com">安全链接</a><p>安全内容</p>' })
   });
   assert.equal(saved.response.status, 200);
   const portal = await request('/api/portal/public');
   assert.equal(portal.body.login_title, 'SQLark QA');
   assert.doesNotMatch(portal.body.login_html, /<script/i);
+  assert.doesNotMatch(portal.body.login_html, /<iframe|<img|onerror|onclick|style=|javascript:/i);
+  assert.match(portal.body.login_html, /href="https:\/\/example\.com"/);
+  assert.match(portal.body.login_html, /rel="noopener noreferrer"/);
   const audit = await request('/api/audit', { token: adminToken });
   assert.equal(audit.response.status, 200);
   assert.ok(audit.body.length >= 1);
+});
+
+test('管理员可备份、下载、上传并事务恢复数据库', async () => {
+  const created = await request('/api/backups', { method:'POST', token:adminToken, body:'{}' });
+  assert.equal(created.response.status,201);
+  const backupId=created.body.id;
+  const listed=await request('/api/backups',{token:adminToken});
+  assert.equal(listed.response.status,200);
+  assert.equal(listed.body.settings.enabled,true);
+  assert.ok(listed.body.backups.some(item=>item.id===backupId));
+  const download=await fetch(`${baseUrl}/api/backups/${encodeURIComponent(backupId)}/download`,{headers:{Authorization:`Bearer ${adminToken}`}});
+  assert.equal(download.status,200);
+  const backupBuffer=await download.arrayBuffer();
+  assert.ok(backupBuffer.byteLength>1000);
+  const marker=await request('/api/assets',{method:'POST',token:adminToken,body:JSON.stringify({name:'恢复测试临时资产',category:'其他',owner:'测试',protocol:'none',enabled:false})});
+  assert.equal(marker.response.status,201);
+  const restored=await request(`/api/backups/${encodeURIComponent(backupId)}/restore`,{method:'POST',token:adminToken,body:'{}'});
+  assert.equal(restored.response.status,200);
+  assert.ok(restored.body.safetyBackup.includes('pre-restore'));
+  const markerAfterRestore=await request('/api/assets?q=恢复测试临时资产',{token:adminToken});
+  assert.equal(markerAfterRestore.body.length,0);
+  const uploadForm=new FormData();uploadForm.append('file',new Blob([backupBuffer]),'uploaded.db');
+  const uploadedResponse=await fetch(`${baseUrl}/api/backups/upload`,{method:'POST',headers:{Authorization:`Bearer ${adminToken}`},body:uploadForm});
+  assert.equal(uploadedResponse.status,201);
+  const removed=await request(`/api/backups/${encodeURIComponent(backupId)}`,{method:'DELETE',token:adminToken});
+  assert.equal(removed.response.status,200);
 });
 
 test('仪表盘统计正确，管理员可删除资产', async () => {

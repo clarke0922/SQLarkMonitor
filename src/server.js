@@ -8,9 +8,12 @@ const ExcelJS = require('exceljs');
 const multer = require('multer');
 const { Readable } = require('stream');
 const crypto = require('crypto');
+const fs = require('fs');
 const { rateLimit } = require('express-rate-limit');
+const sanitizeHtml = require('sanitize-html');
 const db = require('./db');
 const { runChecks } = require('./monitor');
+const backups = require('./backup');
 
 const app = express();
 const secret = process.env.JWT_SECRET || 'dev-only-secret-change-me';
@@ -18,6 +21,7 @@ const loginMaxAttempts = Math.max(3, Number(process.env.LOGIN_MAX_ATTEMPTS || 5)
 const accountLockMinutes = Math.max(1, Number(process.env.ACCOUNT_LOCK_MINUTES || 15));
 const loginRateLimit = Math.max(loginMaxAttempts + 1, Number(process.env.LOGIN_RATE_LIMIT || 20));
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024, files: 1 } });
+const backupUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 100 * 1024 * 1024, files: 1 } });
 const captchaChallenges = new Map();
 const captchaChars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const loginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: loginRateLimit, standardHeaders: 'draft-8', legacyHeaders: false, message: { error: '登录尝试过于频繁，请15分钟后重试' } });
@@ -106,11 +110,18 @@ app.put('/api/portal', auth, allow('admin','editor'), (req, res) => {
   audit(req.user,'update','portal',1,'编辑首页与登录页'); res.json({ok:true});
 });
 function sanitizeRichHtml(input) {
-  return String(input || '')
-    .replace(/<\/?(?:script|style|iframe|object|embed|form|input|button|textarea|select|svg|math)[^>]*>/gi, '')
-    .replace(/\son\w+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
-    .replace(/\s(?:style|class|id)\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
-    .replace(/href\s*=\s*["']?\s*(?:javascript|data):[^\s>"']*/gi, 'href="#"');
+  return sanitizeHtml(String(input || ''), {
+    allowedTags: ['h1','h2','h3','p','br','ul','ol','li','blockquote','pre','code','strong','b','em','i','u','s','a','hr'],
+    allowedAttributes: { a: ['href','title','target','rel'] },
+    allowedSchemes: ['http','https','mailto'],
+    allowedSchemesByTag: { a: ['http','https','mailto'] },
+    allowProtocolRelative: false,
+    transformTags: {
+      a: (tagName, attribs) => ({ tagName, attribs: { ...attribs, target: '_blank', rel: 'noopener noreferrer' } })
+    },
+    disallowedTagsMode: 'discard',
+    enforceHtmlBoundary: true
+  });
 }
 app.put('/api/portal/login', auth, allow('admin'), (req, res) => {
   const { login_title, login_subtitle, login_html } = req.body;
@@ -269,6 +280,30 @@ app.post('/api/users/:id/unlock', auth, allow('admin'), (req,res)=>{
   const target=db.prepare('SELECT username FROM users WHERE id=?').get(req.params.id);if(!target)return res.status(404).json({error:'用户不存在'});
   db.prepare('UPDATE users SET failed_attempts=0,locked_until=NULL WHERE id=?').run(req.params.id);audit(req.user,'unlock','user',Number(req.params.id),target.username);res.json({ok:true});
 });
+app.get('/api/backups', auth, allow('admin'), (req,res)=>res.json({
+  backups:backups.listBackups(),
+  settings:{enabled:process.env.AUTO_BACKUP_ENABLED!=='false',schedule:process.env.AUTO_BACKUP_CRON||'0 2 * * *',retention:Number(process.env.BACKUP_RETENTION||14),directory:backups.backupDir}
+}));
+app.post('/api/backups', auth, allow('admin'), async (req,res)=>{
+  try{const backup=await backups.createBackup('manual');audit(req.user,'backup_create','database',null,backup.id);res.status(201).json(backup);}
+  catch(error){res.status(500).json({error:`备份失败：${error.message}`});}
+});
+app.post('/api/backups/upload', auth, allow('admin'), backupUpload.single('file'), (req,res)=>{
+  try{if(!req.file||!req.file.originalname.toLowerCase().endsWith('.db'))return res.status(400).json({error:'请选择 .db 备份文件'});const backup=backups.importBackup(req.file.buffer);audit(req.user,'backup_upload','database',null,backup.id);res.status(201).json(backup);}
+  catch(error){res.status(400).json({error:`备份文件无效：${error.message}`});}
+});
+app.get('/api/backups/:id/download', auth, allow('admin'), (req,res)=>{
+  try{const filePath=backups.resolveBackup(req.params.id);if(!fs.existsSync(filePath))return res.status(404).json({error:'备份不存在'});res.download(filePath,req.params.id);}
+  catch(error){res.status(400).json({error:error.message});}
+});
+app.post('/api/backups/:id/restore', auth, allow('admin'), async (req,res)=>{
+  try{const safety=await backups.createBackup('pre-restore');const counts=backups.restoreBackup(req.params.id);audit(req.user,'backup_restore','database',null,`恢复 ${req.params.id}，恢复前快照 ${safety.id}`);res.json({ok:true,safetyBackup:safety.id,counts});}
+  catch(error){res.status(400).json({error:`恢复失败，当前数据未更改：${error.message}`});}
+});
+app.delete('/api/backups/:id', auth, allow('admin'), (req,res)=>{
+  try{backups.deleteBackup(req.params.id);audit(req.user,'backup_delete','database',null,req.params.id);res.json({ok:true});}
+  catch(error){res.status(400).json({error:error.message});}
+});
 app.get('/api/assets.csv', auth, (req, res) => {
   const rows = db.prepare('SELECT name,category,environment,owner,department,url,host,port,status,tags,maintenance_expires_at FROM assets ORDER BY id').all();
   const headers = Object.keys(rows[0] || {name:'',category:'',environment:'',owner:'',department:'',url:'',host:'',port:'',status:'',tags:'',maintenance_expires_at:''});
@@ -288,6 +323,11 @@ function startServer(port = Number(process.env.PORT || 3000), options = {}) {
   if (scheduleChecks) {
     const minutes = Math.max(1, Number(process.env.CHECK_INTERVAL_MINUTES || 5));
     cron.schedule(`*/${minutes} * * * *`, () => runChecks().catch(console.error));
+    if(process.env.AUTO_BACKUP_ENABLED!=='false'){
+      const schedule=process.env.AUTO_BACKUP_CRON||'0 2 * * *';
+      if(cron.validate(schedule))cron.schedule(schedule,async()=>{try{const backup=await backups.createBackup('auto');backups.pruneAutoBackups(Number(process.env.BACKUP_RETENTION||14));db.prepare("INSERT INTO audit_logs(username,action,target_type,detail) VALUES('system','backup_auto','database',?)").run(backup.id);console.log('Automatic database backup completed');}catch(error){console.error('Automatic database backup failed:',error);}});
+      else console.error(`Invalid AUTO_BACKUP_CRON: ${schedule}`);
+    }
   }
   const server = app.listen(port, () => {
     const actualPort = server.address()?.port || port;
