@@ -157,12 +157,28 @@ test('MySQL 专项检查使用配置引用、默认端口并记录版本', async
 });
 
 test('只读用户不能修改资产或登录页面', async () => {
+  const weakUser = await request('/api/users', {
+    method: 'POST', token: adminToken,
+    body: JSON.stringify({ username: 'weak_user', display_name: '弱密码用户', role: 'viewer', password: 'abcdefgh' })
+  });
+  assert.equal(weakUser.response.status, 400);
+  assert.match(weakUser.body.error, /大写字母.*小写字母.*数字.*特殊字符/);
   const createdUser = await request('/api/users', {
     method: 'POST', token: adminToken,
-    body: JSON.stringify({ username: 'test_viewer', display_name: '测试只读用户', role: 'viewer', password: 'ViewerTest123!' })
+    body: JSON.stringify({ username: 'test_viewer', display_name: '测试只读用户', role: 'viewer', password: 'Aa1!aaaa' })
   });
   assert.equal(createdUser.response.status, 201);
-  const viewerLogin = await login('test_viewer', 'ViewerTest123!');
+  const weakUpdate = await request(`/api/users/${createdUser.body.id}`, {
+    method:'PUT', token:adminToken,
+    body:JSON.stringify({display_name:'测试只读用户',role:'viewer',active:true,password:'onlylowercase'})
+  });
+  assert.equal(weakUpdate.response.status,400);
+  const strongUpdate = await request(`/api/users/${createdUser.body.id}`, {
+    method:'PUT', token:adminToken,
+    body:JSON.stringify({display_name:'测试只读用户',role:'viewer',active:true,password:'Bb2@bbbb'})
+  });
+  assert.equal(strongUpdate.response.status,200);
+  const viewerLogin = await login('test_viewer', 'Bb2@bbbb');
   const deniedAsset = await request('/api/assets', { method: 'POST', token: viewerLogin.body.token, body: JSON.stringify({ name: '越权资产', category: '其他', owner: 'viewer' }) });
   assert.equal(deniedAsset.response.status, 403);
   const deniedPortal = await request('/api/portal/login', { method: 'PUT', token: viewerLogin.body.token, body: JSON.stringify({ login_title: 'x', login_subtitle: 'x', login_html: '<p>x</p>' }) });

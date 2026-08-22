@@ -57,6 +57,8 @@ function audit(user, action, targetType, targetId, detail = '') {
   db.prepare('INSERT INTO audit_logs(user_id,username,action,target_type,target_id,detail) VALUES(?,?,?,?,?,?)')
     .run(user.id, user.username, action, targetType, targetId || null, detail);
 }
+function validPassword(password) { return /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,128}$/.test(String(password || '')); }
+const passwordRuleMessage = '密码需为8-128位，并包含大写字母、小写字母、数字和特殊字符';
 
 app.get('/api/captcha', captchaLimiter, (req,res)=>{
   const now=Date.now(); for(const [id,value] of captchaChallenges)if(value.expiresAt<now)captchaChallenges.delete(id);
@@ -317,8 +319,9 @@ app.post('/api/settings/feishu/test', auth, allow('admin'), async (req,res)=>{
 });
 app.post('/api/users', auth, allow('admin'), (req, res) => {
   const { username, display_name, role, password } = req.body;
-  if (!/^\w{3,32}$/.test(username || '') || !display_name || !['admin','editor','viewer'].includes(role) || String(password || '').length < 10)
-    return res.status(400).json({ error: '用户名需为3-32位字母数字下划线，密码至少10位' });
+  if (!/^\w{3,32}$/.test(username || '') || !display_name || !['admin','editor','viewer'].includes(role))
+    return res.status(400).json({ error: '用户名需为3-32位字母数字下划线，用户资料不能为空' });
+  if (!validPassword(password)) return res.status(400).json({ error: passwordRuleMessage });
   try { const r=db.prepare('INSERT INTO users(username,password_hash,display_name,role) VALUES(?,?,?,?)').run(username,bcrypt.hashSync(password,12),display_name,role); audit(req.user,'create','user',r.lastInsertRowid,username); res.status(201).json({id:r.lastInsertRowid}); }
   catch { res.status(409).json({ error: '用户名已存在' }); }
 });
@@ -326,7 +329,7 @@ app.put('/api/users/:id', auth, allow('admin'), (req, res) => {
   const { display_name, role, active, password } = req.body;
   if (!display_name || !['admin','editor','viewer'].includes(role)) return res.status(400).json({error:'用户资料无效'});
   if (Number(req.params.id)===req.user.id && active===false) return res.status(400).json({error:'不能停用当前账号'});
-  if (password && String(password).length<10) return res.status(400).json({error:'密码至少10位'});
+  if (password && !validPassword(password)) return res.status(400).json({error:passwordRuleMessage});
   db.prepare(`UPDATE users SET display_name=?,role=?,active=?,password_hash=CASE WHEN ?='' THEN password_hash ELSE ? END WHERE id=?`)
     .run(display_name,role,active===false?0:1,password||'',password?bcrypt.hashSync(password,12):'',req.params.id);
   audit(req.user,'update','user',Number(req.params.id)); res.json({ok:true});
