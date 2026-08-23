@@ -72,12 +72,89 @@ Administrators can also manage the webhook and signing secret and send a test me
 
 New asset-offline, certificate-expiration, and maintenance/license-expiration alerts are sent to Feishu. An unresolved alert of the same type for the same asset is not sent repeatedly.
 
-## Docker
+## Deployment
+
+The application requires Node.js 20 or later. For every deployment method, create `.env` from `.env.example`, replace `JWT_SECRET` and `ADMIN_PASSWORD`, keep the `data` directory on persistent storage, and expose port 3000 only to trusted networks or an HTTPS reverse proxy.
+
+### Windows
+
+Run from PowerShell in the project directory:
+
+```powershell
+Copy-Item .env.example .env
+npm.cmd ci --omit=dev
+npm.cmd start
+```
+
+To start at boot without keeping a terminal open, register a Windows scheduled task from an elevated PowerShell session:
+
+```powershell
+$project = (Get-Location).Path
+$npm = (Get-Command npm.cmd).Source
+$action = New-ScheduledTaskAction -Execute $npm -Argument 'start' -WorkingDirectory $project
+$trigger = New-ScheduledTaskTrigger -AtStartup
+Register-ScheduledTask -TaskName SQLarkMonitor -Action $action -Trigger $trigger -User SYSTEM -RunLevel Highest
+Start-ScheduledTask -TaskName SQLarkMonitor
+```
+
+Manage it with `Get-ScheduledTask -TaskName SQLarkMonitor`, `Stop-ScheduledTask -TaskName SQLarkMonitor`, and `Start-ScheduledTask -TaskName SQLarkMonitor`. After upgrading the source, run `npm.cmd ci --omit=dev` and restart the task. Back up `.env` securely and copy the entire `data` directory, including its `backups` subdirectory.
+
+### Linux (systemd)
+
+Install the project in `/opt/sqlark-monitor`, then install production dependencies:
+
+```bash
+cd /opt/sqlark-monitor
+cp .env.example .env
+npm ci --omit=dev
+sudo useradd --system --home /opt/sqlark-monitor --shell /usr/sbin/nologin sqlark 2>/dev/null || true
+sudo chown -R sqlark:sqlark /opt/sqlark-monitor
+```
+
+Create `/etc/systemd/system/sqlark-monitor.service`:
+
+```ini
+[Unit]
+Description=SQLark Monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sqlark
+WorkingDirectory=/opt/sqlark-monitor
+EnvironmentFile=/opt/sqlark-monitor/.env
+ExecStart=/usr/bin/npm start
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Confirm the npm path with `command -v npm` and adjust `ExecStart` if required, then enable the service:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now sqlark-monitor
+sudo systemctl status sqlark-monitor
+sudo journalctl -u sqlark-monitor -f
+```
+
+For upgrades, stop the service, update the source, run `npm ci --omit=dev`, and start it again. Persist and back up `/opt/sqlark-monitor/data` and protect `/opt/sqlark-monitor/.env` with restrictive permissions such as `chmod 600`.
+
+### Docker Compose
+
+The included Compose file builds the image, publishes port 3000, loads `.env`, restarts the container automatically, and persists SQLite data in `./data`:
 
 ```bash
 cp .env.example .env
 docker compose up -d --build
+docker compose ps
+docker compose logs -f sqlark-monitor
 ```
+
+Upgrade and restart with `docker compose up -d --build`. Stop with `docker compose down`; do not add `--volumes` unless you intentionally want to remove persistent data. Back up `.env` securely and copy the host-side `data` directory.
 
 ## CSV / Excel bulk import
 

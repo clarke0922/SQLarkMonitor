@@ -72,12 +72,89 @@ FEISHU_WEBHOOK_SECRET=请替换为签名密钥
 
 新产生的资产离线、证书到期和维护/许可到期告警会推送到飞书。同一资产同一类型的未解决告警不会重复发送。
 
-## Docker
+## 部署方式
+
+应用要求 Node.js 20 或更高版本。无论使用哪种部署方式，都应先从 `.env.example` 创建 `.env`，替换 `JWT_SECRET` 和 `ADMIN_PASSWORD`，将 `data` 目录放在持久化存储中，并且只向可信网络或 HTTPS 反向代理开放 3000 端口。
+
+### Windows
+
+在项目目录中通过 PowerShell 运行：
+
+```powershell
+Copy-Item .env.example .env
+npm.cmd ci --omit=dev
+npm.cmd start
+```
+
+如需开机自动运行且不保留终端窗口，请在管理员 PowerShell 中注册计划任务：
+
+```powershell
+$project = (Get-Location).Path
+$npm = (Get-Command npm.cmd).Source
+$action = New-ScheduledTaskAction -Execute $npm -Argument 'start' -WorkingDirectory $project
+$trigger = New-ScheduledTaskTrigger -AtStartup
+Register-ScheduledTask -TaskName SQLarkMonitor -Action $action -Trigger $trigger -User SYSTEM -RunLevel Highest
+Start-ScheduledTask -TaskName SQLarkMonitor
+```
+
+使用 `Get-ScheduledTask -TaskName SQLarkMonitor` 查看状态，通过 `Stop-ScheduledTask` 和 `Start-ScheduledTask` 停止或启动。升级代码后运行 `npm.cmd ci --omit=dev` 并重启任务。请安全备份 `.env`，并复制完整的 `data` 目录，包括其中的 `backups` 子目录。
+
+### Linux（systemd）
+
+将项目放到 `/opt/sqlark-monitor`，然后安装生产依赖：
+
+```bash
+cd /opt/sqlark-monitor
+cp .env.example .env
+npm ci --omit=dev
+sudo useradd --system --home /opt/sqlark-monitor --shell /usr/sbin/nologin sqlark 2>/dev/null || true
+sudo chown -R sqlark:sqlark /opt/sqlark-monitor
+```
+
+创建 `/etc/systemd/system/sqlark-monitor.service`：
+
+```ini
+[Unit]
+Description=SQLark Monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sqlark
+WorkingDirectory=/opt/sqlark-monitor
+EnvironmentFile=/opt/sqlark-monitor/.env
+ExecStart=/usr/bin/npm start
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+使用 `command -v npm` 确认 npm 路径，必要时调整 `ExecStart`，然后启用服务：
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now sqlark-monitor
+sudo systemctl status sqlark-monitor
+sudo journalctl -u sqlark-monitor -f
+```
+
+升级时先停止服务，更新代码并运行 `npm ci --omit=dev`，然后重新启动。需要持久化并备份 `/opt/sqlark-monitor/data`，同时通过 `chmod 600` 等方式限制 `/opt/sqlark-monitor/.env` 的访问权限。
+
+### Docker Compose
+
+仓库中的 Compose 文件会构建镜像、映射 3000 端口、加载 `.env`、自动重启容器，并将 SQLite 数据持久化到 `./data`：
 
 ```bash
 cp .env.example .env
 docker compose up -d --build
+docker compose ps
+docker compose logs -f sqlark-monitor
 ```
+
+使用 `docker compose up -d --build` 升级并重启，使用 `docker compose down` 停止。除非确定需要删除持久化数据，否则不要添加 `--volumes`。请安全备份 `.env` 和宿主机上的 `data` 目录。
 
 ## CSV / Excel 批量导入
 
