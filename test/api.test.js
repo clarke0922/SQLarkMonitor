@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { detectLocale, translate } = require('../public/i18n');
 
 const testDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sqlark-monitor-test-'));
 process.env.NODE_ENV = 'test';
@@ -24,6 +25,14 @@ let adminToken;
 let assetId;
 let importedAssetId;
 let databaseAssetId;
+
+test('国际化默认英语并自动识别中文系统语言', () => {
+  assert.equal(detectLocale([]),'en');
+  assert.equal(detectLocale(['fr-FR']),'en');
+  assert.equal(detectLocale(['zh-CN']),'zh-CN');
+  assert.equal(translate('用户管理','en'),'User management');
+  assert.equal(translate('用户管理','zh-CN'),'用户管理');
+});
 
 async function request(url, options = {}) {
   const response = await fetch(`${baseUrl}${url}`, {

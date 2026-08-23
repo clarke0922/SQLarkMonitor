@@ -6,6 +6,10 @@ An asset inventory and health monitoring platform for QA departments. It manages
 
 The design borrows asset ownership and lifecycle concepts from [Snipe-IT](https://github.com/grokability/snipe-it), while using a lightweight Node.js and SQLite implementation suited to GitLab, Nexus, OA systems, databases, and servers. Snipe-IT is licensed under AGPL-3.0; this project does not copy its source code.
 
+## Language
+
+The interface defaults to English. On first load it reads the browser/system language and automatically switches to Simplified Chinese when a `zh` locale is detected; all other and unknown locales fall back to English. User-entered asset data and editable portal content are kept unchanged.
+
 ## Local setup
 
 ```powershell
@@ -179,3 +183,9 @@ User passwords must be 8–128 characters and contain uppercase and lowercase le
 Administrators can create, download, upload, restore, and delete SQLite backups from Backup & Restore. Before restoration, the system verifies database integrity, required tables, foreign keys, and an active administrator account, then creates a pre-restore snapshot. Business data is restored in one transaction and fully rolled back on failure. Automatic backups are controlled by `AUTO_BACKUP_ENABLED`, `AUTO_BACKUP_CRON`, and `BACKUP_RETENTION`; by default, they run daily at 2:00 AM and retain 14 automatic backups.
 
 Health checks support HTTP/HTTPS, TCP, and authenticated version queries for MySQL, PostgreSQL, SQL Server, and Oracle. Database assets store only `profile://name`; credentials come from `.env` and are never written to SQLite. The default ports are 3306, 5432, 1433, and 1521 respectively. For Oracle, enter the Service Name in the database/service-name field.
+
+## Support the project
+
+If SQLark Monitor helps your team, you can support its continued maintenance and improvement with a voluntary WeChat donation. Thank you for every contribution and every piece of feedback.
+
+<img src="assets/wechat-donate.jpg" alt="WeChat donation QR code" width="320">

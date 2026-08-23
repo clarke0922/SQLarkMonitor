@@ -6,6 +6,10 @@
 
 设计参考了 [Snipe-IT](https://github.com/grokability/snipe-it) 的资产台账、负责人和生命周期思路，但采用轻量 Node.js + SQLite 实现，更适合 GitLab、Nexus、OA、数据库与服务器等电子资产。Snipe-IT 为 AGPL-3.0；本项目未复制其源代码。
 
+## 语言
+
+界面默认使用英语。首次加载时会读取浏览器/系统语言；检测到 `zh` 语言环境时自动切换为简体中文，其他语言和未知语言均回退到英语。用户填写的资产数据和可编辑门户内容不会被翻译。
+
 ## 本地运行
 
 ```powershell
@@ -179,3 +183,9 @@ npm.cmd test
 管理员可在“备份与恢复”中创建、下载、上传、恢复和删除 SQLite 备份。恢复前会校验数据库完整性、必要数据表、外键和管理员账号，并自动创建恢复前快照；业务数据在单个事务中恢复，失败时整体回滚。自动备份由 `AUTO_BACKUP_ENABLED`、`AUTO_BACKUP_CRON` 和 `BACKUP_RETENTION` 控制，默认每天凌晨2点执行并保留14份自动备份。
 
 健康检查支持 HTTP/HTTPS、TCP，以及 MySQL、PostgreSQL、SQL Server、Oracle 的真实登录与版本查询。数据库资产只保存 `profile://配置名`，账号密码通过 `.env` 提供，不写入 SQLite。MySQL、PostgreSQL、SQL Server、Oracle 默认端口分别为 3306、5432、1433、1521；Oracle 的“数据库名/服务名”填写 Service Name。配置方法见上方的 `.env` 配置与维护章节。
+
+## 支持项目
+
+如果 SQLark Monitor 对你的团队有所帮助，欢迎通过微信自愿打赏，支持项目持续维护和改进。感谢每一份支持，也感谢你的使用与反馈。
+
+<img src="assets/wechat-donate.jpg" alt="微信打赏二维码" width="320">
