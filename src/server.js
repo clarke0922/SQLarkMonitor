@@ -297,6 +297,23 @@ app.get('/api/audit.csv', auth, allow('admin'), (req,res)=>{
   res.type('text/csv').attachment('sqlark-audit-logs.csv').send(csv);
 });
 app.get('/api/users', auth, allow('admin'), (req, res) => res.json(db.prepare('SELECT id,username,display_name,role,active,failed_attempts,locked_until,created_at FROM users ORDER BY id').all()));
+app.get('/api/credentials', auth, allow('admin'), (req,res)=>res.json(db.prepare("SELECT id,name,username,description,1 password_configured,created_at,updated_at FROM credential_profiles ORDER BY name").all()));
+app.post('/api/credentials', auth, allow('admin'), (req,res)=>{
+  const name=String(req.body.name||'').trim(),username=String(req.body.username||'').trim(),password=String(req.body.password||''),description=String(req.body.description||'').trim();
+  if(!/^[A-Za-z0-9_-]{2,64}$/.test(name)||!username||!password)return res.status(400).json({error:'配置名需为2-64位字母数字下划线或连字符，用户名和密码不能为空'});
+  try{const result=db.prepare('INSERT INTO credential_profiles(name,username,password_encrypted,description) VALUES(?,?,?,?)').run(name,username,encryptSecret(password),description);audit(req.user,'create','credential',result.lastInsertRowid,name);res.status(201).json({id:result.lastInsertRowid});}
+  catch(error){if(error.code==='SQLITE_CONSTRAINT_UNIQUE')return res.status(409).json({error:'密码库配置名已存在'});res.status(400).json({error:error.message});}
+});
+app.put('/api/credentials/:id', auth, allow('admin'), (req,res)=>{
+  const current=db.prepare('SELECT * FROM credential_profiles WHERE id=?').get(req.params.id);if(!current)return res.status(404).json({error:'密码库配置不存在'});
+  const username=String(req.body.username||'').trim(),password=String(req.body.password||''),description=String(req.body.description||'').trim();if(!username)return res.status(400).json({error:'用户名不能为空'});
+  db.prepare('UPDATE credential_profiles SET username=?,password_encrypted=?,description=?,updated_at=CURRENT_TIMESTAMP WHERE id=?').run(username,password?encryptSecret(password):current.password_encrypted,description,req.params.id);audit(req.user,'update','credential',Number(req.params.id),current.name);res.json({ok:true});
+});
+app.delete('/api/credentials/:id', auth, allow('admin'), (req,res)=>{
+  const current=db.prepare('SELECT * FROM credential_profiles WHERE id=?').get(req.params.id);if(!current)return res.status(404).json({error:'密码库配置不存在'});
+  const used=db.prepare('SELECT COUNT(*) count FROM assets WHERE secret_ref=?').get(`profile://${current.name}`).count;if(used)return res.status(409).json({error:`该密码库配置正被 ${used} 个资产引用，不能删除`});
+  db.prepare('DELETE FROM credential_profiles WHERE id=?').run(req.params.id);audit(req.user,'delete','credential',Number(req.params.id),current.name);res.json({ok:true});
+});
 app.get('/api/settings/feishu', auth, allow('admin'), (req,res)=>{
   const config=feishuConfig();
   res.json({source:config.source,enabled:config.enabled,webhook_configured:!!config.url,secret_configured:!!config.secret});

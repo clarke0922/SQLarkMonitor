@@ -18,6 +18,8 @@ function databaseProfiles() {
 function databaseProfile(asset) {
   const match = /^profile:\/\/([A-Za-z0-9_-]+)$/.exec(asset.secret_ref || '');
   if (!match) throw new Error('数据库凭据引用格式无效');
+  const stored = db.prepare('SELECT username,password_encrypted FROM credential_profiles WHERE name=?').get(match[1]);
+  if (stored) return { username:stored.username, password:decryptSecret(stored.password_encrypted) };
   const profile = databaseProfiles()[match[1]];
   if (!profile?.username || !profile?.password) throw new Error(`未找到数据库检查配置：${match[1]}`);
   return profile;
@@ -103,7 +105,7 @@ function encryptSecret(value) {
 function decryptSecret(value) {
   if (!value) return '';
   const [version,iv,tag,encrypted]=value.split(':');
-  if(version!=='v1'||!iv||!tag||!encrypted)throw new Error('飞书签名密钥无法解密');
+  if(version!=='v1'||!iv||!tag||!encrypted)throw new Error('加密凭据无法解密');
   const decipher=crypto.createDecipheriv('aes-256-gcm',encryptionKey(),Buffer.from(iv,'base64'));decipher.setAuthTag(Buffer.from(tag,'base64'));
   return Buffer.concat([decipher.update(Buffer.from(encrypted,'base64')),decipher.final()]).toString('utf8');
 }
@@ -186,4 +188,4 @@ async function runChecks() {
 function setDatabaseAdaptersForTest(overrides) { databaseAdapters = { ...databaseAdapters, ...overrides }; }
 function setNotificationFetchForTest(fetcher) { notificationFetch = fetcher; }
 
-module.exports = { runChecks, sendFeishu, feishuConfig, encryptSecret, setDatabaseAdaptersForTest, setNotificationFetchForTest };
+module.exports = { runChecks, sendFeishu, feishuConfig, encryptSecret, decryptSecret, setDatabaseAdaptersForTest, setNotificationFetchForTest };

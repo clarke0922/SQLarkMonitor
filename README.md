@@ -63,6 +63,12 @@ Maintenance rules:
 - When staff leave, credentials leak, or secrets expire, update the matching `.env` profile and restart the service. The asset's `profile://` reference usually does not need to change.
 - When adding a variable, update both `.env.example` and this section without including real addresses, usernames, passwords, or tokens.
 
+### Credential vault
+
+Administrators can create database-check credentials under **Credential vault** without restarting the service. Each entry has a profile name, username, password, and description; assets reference it as `profile://name`. Passwords are encrypted with AES-256-GCM using a key derived from `JWT_SECRET`, and neither the API nor the page displays them after saving. Keep `JWT_SECRET` stable and securely backed up, because changing it makes stored credentials unreadable.
+
+Admin-managed credentials take priority over profiles with the same name in `DB_CHECK_PROFILES_JSON`; `.env` remains the fallback and emergency configuration. A credential that is still referenced by an asset cannot be deleted. Credential changes and deletions are recorded in the audit log and included in new SQLite backups.
+
 ### Feishu alerts
 
 Add a custom bot to a Feishu group, copy its webhook, enable signature verification if possible, and configure:

@@ -6,6 +6,7 @@ const db = require('./db');
 const backupDir = path.join(path.dirname(db.name), 'backups');
 fs.mkdirSync(backupDir, { recursive: true });
 const requiredTables = ['users','assets','alerts','audit_logs','portal_settings'];
+const optionalTables = ['credential_profiles'];
 
 function backupId(type = 'manual') {
   return `${new Date().toISOString().replace(/[:.]/g,'-')}-${Math.random().toString(16).slice(2,8)}-${type}.db`;
@@ -22,7 +23,7 @@ function inspectBackup(filePath) {
     const missing = requiredTables.filter(table=>!tables.has(table));
     if (missing.length) throw new Error(`缺少必要数据表：${missing.join(', ')}`);
     if(source.pragma('foreign_key_check').length)throw new Error('外键完整性检查失败');
-    const counts=Object.fromEntries(requiredTables.map(table=>[table,source.prepare(`SELECT COUNT(*) count FROM "${table}"`).get().count]));
+    const counts=Object.fromEntries([...requiredTables,...optionalTables.filter(table=>tables.has(table))].map(table=>[table,source.prepare(`SELECT COUNT(*) count FROM "${table}"`).get().count]));
     if(counts.portal_settings<1)throw new Error('缺少门户配置数据');
     if(!source.prepare("SELECT 1 FROM users WHERE role='admin' AND active=1 LIMIT 1").get())throw new Error('备份中没有可用管理员账号');
     return counts;
@@ -53,14 +54,16 @@ function restoreBackup(id) {
   const filePath=resolveBackup(id); const counts=inspectBackup(filePath); const source=new Database(filePath,{readonly:true,fileMustExist:true});
   try {
     const snapshot={};
-    for(const table of requiredTables){
+    const sourceTables=new Set(source.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(row=>row.name));
+    const restoreTables=[...requiredTables,...optionalTables.filter(table=>sourceTables.has(table))];
+    for(const table of restoreTables){
       const currentColumns=new Set(db.pragma(`table_info("${table}")`).map(column=>column.name));
       const sourceColumns=source.pragma(`table_info("${table}")`).map(column=>column.name).filter(column=>currentColumns.has(column));
       snapshot[table]={columns:sourceColumns,rows:source.prepare(`SELECT ${sourceColumns.map(column=>`"${column}"`).join(',')} FROM "${table}"`).all()};
     }
     db.transaction(()=>{
-      for(const table of ['alerts','audit_logs','assets','users','portal_settings'])db.prepare(`DELETE FROM "${table}"`).run();
-      for(const table of ['users','assets','alerts','audit_logs','portal_settings']){
+      for(const table of restoreTables.slice().reverse())db.prepare(`DELETE FROM "${table}"`).run();
+      for(const table of restoreTables){
         const {columns,rows}=snapshot[table];if(!rows.length)continue;
         const placeholders=columns.map(()=>'?').join(',');const statement=db.prepare(`INSERT INTO "${table}" (${columns.map(column=>`"${column}"`).join(',')}) VALUES (${placeholders})`);
         for(const row of rows)statement.run(...columns.map(column=>row[column]));

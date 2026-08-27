@@ -17,7 +17,8 @@ process.env.DB_CHECK_PROFILES_JSON = JSON.stringify({ mysql_test: { username:'mo
 const { startServer } = require('../src/server');
 const { sendFeishu, setDatabaseAdaptersForTest, setNotificationFetchForTest } = require('../src/monitor');
 const db = require('../src/db');
-setDatabaseAdaptersForTest({ mysql: async () => 'MySQL 8.0-test' });
+let checkedDatabaseProfile;
+setDatabaseAdaptersForTest({ mysql: async (asset, profile) => { checkedDatabaseProfile=profile; return 'MySQL 8.0-test'; } });
 
 let server;
 let baseUrl;
@@ -25,6 +26,7 @@ let adminToken;
 let assetId;
 let importedAssetId;
 let databaseAssetId;
+let credentialId;
 
 test('国际化默认英语并自动识别中文系统语言', () => {
   assert.equal(detectLocale([]),'en');
@@ -150,10 +152,25 @@ test('手工巡检可将 TCP 资产标记为在线', async () => {
   assert.ok(assets.body[0].last_latency_ms >= 0);
 });
 
+test('管理员可管理加密凭据且接口不回显密码', async () => {
+  const invalid=await request('/api/credentials',{method:'POST',token:adminToken,body:JSON.stringify({name:'!',username:'',password:''})});
+  assert.equal(invalid.response.status,400);
+  const created=await request('/api/credentials',{method:'POST',token:adminToken,body:JSON.stringify({name:'mysql_vault',username:'vault_monitor',password:'vault-test-password',description:'MySQL 测试凭据'})});
+  assert.equal(created.response.status,201);credentialId=created.body.id;
+  const stored=db.prepare('SELECT password_encrypted FROM credential_profiles WHERE id=?').get(credentialId);
+  assert.doesNotMatch(stored.password_encrypted,/vault-test-password/);
+  const listed=await request('/api/credentials',{token:adminToken});
+  assert.equal(listed.response.status,200);assert.equal(listed.body[0].password_configured,1);
+  assert.doesNotMatch(JSON.stringify(listed.body),/vault-test-password|password_encrypted/);
+  const updated=await request(`/api/credentials/${credentialId}`,{method:'PUT',token:adminToken,body:JSON.stringify({username:'vault_monitor_updated',password:'',description:'已更新'})});
+  assert.equal(updated.response.status,200);
+  assert.equal(db.prepare('SELECT password_encrypted FROM credential_profiles WHERE id=?').get(credentialId).password_encrypted,stored.password_encrypted);
+});
+
 test('MySQL 专项检查使用配置引用、默认端口并记录版本', async () => {
   const invalid = await request('/api/assets', { method:'POST', token:adminToken, body:JSON.stringify({ name:'无凭据数据库', category:'数据库', owner:'DBA', protocol:'mysql', host:'127.0.0.1', database_name:'sqlark', secret_ref:'明文密码' }) });
   assert.equal(invalid.response.status,400);
-  const created = await request('/api/assets', { method:'POST', token:adminToken, body:JSON.stringify({ name:'MySQL 测试库', category:'数据库', environment:'测试', owner:'DBA', protocol:'mysql', host:'127.0.0.1', database_name:'sqlark', secret_ref:'profile://mysql_test', enabled:true }) });
+  const created = await request('/api/assets', { method:'POST', token:adminToken, body:JSON.stringify({ name:'MySQL 测试库', category:'数据库', environment:'测试', owner:'DBA', protocol:'mysql', host:'127.0.0.1', database_name:'sqlark', secret_ref:'profile://mysql_vault', enabled:true }) });
   assert.equal(created.response.status,201);
   databaseAssetId=created.body.id;
   await request('/api/checks/run',{method:'POST',token:adminToken,body:'{}'});
@@ -161,8 +178,11 @@ test('MySQL 专项检查使用配置引用、默认端口并记录版本', async
   assert.equal(listed.body[0].port,3306);
   assert.equal(listed.body[0].status,'online');
   assert.equal(listed.body[0].last_check_detail,'MySQL 8.0-test');
-  assert.equal(listed.body[0].secret_ref,'profile://mysql_test');
+  assert.equal(listed.body[0].secret_ref,'profile://mysql_vault');
+  assert.deepEqual(checkedDatabaseProfile,{username:'vault_monitor_updated',password:'vault-test-password'});
   assert.equal(JSON.stringify(listed.body).includes('test-only-password'),false);
+  const protectedDelete=await request(`/api/credentials/${credentialId}`,{method:'DELETE',token:adminToken});
+  assert.equal(protectedDelete.response.status,409);
 });
 
 test('只读用户不能修改资产或登录页面', async () => {
@@ -194,6 +214,8 @@ test('只读用户不能修改资产或登录页面', async () => {
   assert.equal(deniedPortal.response.status, 403);
   const deniedFeishu = await request('/api/settings/feishu', { token:viewerLogin.body.token });
   assert.equal(deniedFeishu.response.status,403);
+  const deniedCredentials = await request('/api/credentials', { token:viewerLogin.body.token });
+  assert.equal(deniedCredentials.response.status,403);
 });
 
 test('连续五次密码错误会锁定账号，管理员可解锁', async () => {
@@ -314,8 +336,18 @@ test('仪表盘统计正确，管理员可删除资产', async () => {
   assert.equal(removed.response.status, 200);
   await request(`/api/assets/${importedAssetId}`, { method: 'DELETE', token: adminToken });
   await request(`/api/assets/${databaseAssetId}`, { method: 'DELETE', token: adminToken });
+  const removedCredential=await request(`/api/credentials/${credentialId}`,{method:'DELETE',token:adminToken});
+  assert.equal(removedCredential.response.status,200);
   const assets = await request('/api/assets', { token: adminToken });
   assert.equal(assets.body.length, 0);
+});
+
+test('后台无同名凭据时数据库巡检回退到 .env', async () => {
+  const created=await request('/api/assets',{method:'POST',token:adminToken,body:JSON.stringify({name:'环境变量凭据测试库',category:'数据库',owner:'DBA',protocol:'mysql',host:'127.0.0.1',database_name:'sqlark',secret_ref:'profile://mysql_test',enabled:true})});
+  assert.equal(created.response.status,201);
+  await request('/api/checks/run',{method:'POST',token:adminToken,body:'{}'});
+  assert.deepEqual(checkedDatabaseProfile,{username:'monitor',password:'test-only-password'});
+  await request(`/api/assets/${created.body.id}`,{method:'DELETE',token:adminToken});
 });
 
 test('同一 IP 超过登录频率上限会被限流', async () => {
